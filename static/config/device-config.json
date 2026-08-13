@@ -1,0 +1,434 @@
+{
+  "schemaVersion": 1,
+  "device": {
+    "product": "unified",
+    "name": "MAXiCom",
+    "title": "Dashboard",
+    "subtitle": "Energy and battery management platform"
+  },
+  "navigation": {
+    "defaultItem": "dashboard",
+    "enabledItems": [
+      "dashboard",
+      "status",
+	  "system-info",
+      "battery-strings",
+      "assets",
+      "inverters",
+      "meters",
+      "data-loggers",
+      "ess",
+      "wika",
+      "hybrid-controller",
+      "serial-tcp",
+      "network",
+      "vpn",
+      "calibration",
+      "alerts",
+      "maintenance"
+    ]
+  },
+  "connectivity": {
+    "serial": true,
+    "tcp": true
+  },
+  "systemInfo": {
+    "hardwareModel": "MAXiCom Edge Controller",
+    "firmwareVersion": "1.0.1",
+    "softwareVersion": "MAXiCom Platform 1.0",
+    "uptime": "12 days 04 hours",
+    "cpuUsage": "12.4%",
+    "memoryUsage": "18.0%",
+    "diskUsage": "29.0%",
+    "ipv4Address": "192.168.4.83",
+    "macAddress": "00:00:00:00:00:00"
+  },
+  "rts": {
+    "systemInfo": {
+      "serialNumber": "MR2626",
+      "defaultUser": {
+        "username": "admin",
+        "passwordHash": "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918"
+      }
+    },
+    "sidebarConfig": {
+      "status": {
+        "visible": true
+      },
+      "serial": {
+        "visible": true
+      },
+      "network": {
+        "visible": true
+      },
+      "inverter": {
+        "visible": true
+      },
+      "meter": {
+        "visible": true
+      },
+      "wika": {
+        "visible": false
+      },
+      "ess": {
+        "visible": false
+      },
+      "smartLogger": {
+        "visible": true
+      },
+      "hybridController": {
+        "visible": true
+      },
+      "vpn": {
+        "visible": true
+      }
+    },
+    "serialPortTemplates": [
+      {
+        "key": "modbus0",
+        "displayName": "Port 1",
+        "portName": "/dev/ttyS1"
+      },
+      {
+        "key": "modbus1",
+        "displayName": "Port 2",
+        "portName": "/dev/ttyS7"
+      },
+      {
+        "key": "modbus2",
+        "displayName": "Port 3",
+        "portName": "/dev/ttyS9"
+      }
+    ],
+    "tcpBridgeTemplates": [
+      {
+        "key": "modbus3",
+        "displayName": "TCP Bridge 1"
+      },
+      {
+        "key": "modbus4",
+        "displayName": "TCP Bridge 2"
+      },
+      {
+        "key": "modbus5",
+        "displayName": "TCP Bridge 3"
+      }
+    ],
+    "inverterSetup": {
+      "currentTier": "level3",
+      "tiers": {
+        "level1": {
+          "label": "Basic",
+          "maxInverters": 10,
+          "maxTotalPowerKW": 400
+        },
+        "level2": {
+          "label": "Plus",
+          "maxInverters": 15,
+          "maxTotalPowerKW": 700
+        },
+        "level3": {
+          "label": "Premium",
+          "maxInverters": 20,
+          "maxTotalPowerKW": 1000
+        }
+      },
+      "inverterBrands": [
+        {
+          "name": "Fronius",
+          "factoryId": "PV-Inverter.Fronius"
+        },
+        {
+          "name": "Huawei Hybrid",
+          "factoryId": "PV-Inverter.Huawei.Hybrid"
+        },
+        {
+          "name": "Huawei OnGrid",
+          "factoryId": "PV-Inverter.Huawei.OnGrid"
+        },
+        {
+          "name": "KACO blueplanet",
+          "factoryId": "PV-Inverter.KACO.blueplanet"
+        },
+        {
+          "name": "Kostal",
+          "factoryId": "PV-Inverter.Kostal"
+        },
+        {
+          "name": "SMA Sunny Tripower",
+          "factoryId": "PV-Inverter.SMA.SunnyTripower"
+        },
+        {
+          "name": "Solar-Log",
+          "factoryId": "PV-Inverter.Solarlog"
+        },
+        {
+          "name": "SolarEdge",
+          "factoryId": "pvinverter.solaredge.modbus"
+        },
+        {
+          "name": "Cluster",
+          "factoryId": "PvInverter.Cluster"
+        },
+        {
+          "name": "PvInverter CallApi",
+          "factoryId": "PvInverter.CallApi"
+        },
+        {
+          "name": "Deye Hybrid",
+          "factoryId": "PV-Inverter.Deye.Hybrid"
+        },
+        {
+          "name": "SMA Hybrid",
+          "factoryId": "PV-Inverter.SMA.Hybrid"
+        },
+        {
+          "name": "Solis Hybrid",
+          "factoryId": "PV-Inverter.Solis.Hybrid"
+        },
+        {
+          "name": "Solis OnGrid",
+          "factoryId": "PV-Inverter.Solis.OnGrid"
+        },
+        {
+          "name": "Sungrow Hybrid",
+          "factoryId": "io.openems.edge.pvinverter.sungrow"
+        }
+      ]
+    },
+    "meterSetup": {
+      "meterTypes": [
+        {
+          "value": "GRID",
+          "display": "POI"
+        },
+        {
+          "value": "PRODUCTION",
+          "display": "Production"
+        },
+        {
+          "value": "PRODUCTION_AND_CONSUMPTION",
+          "display": "Production & Consumption"
+        },
+        {
+          "value": "CONSUMPTION_METERED",
+          "display": "Consumption Metered"
+        }
+      ],
+      "meterBrands": [
+        {
+          "name": "Elecnova PD194Z E14",
+          "factoryId": "Meter.Elecnova.PD194Z.E14"
+        },
+        {
+          "name": "Schneider PM2000 Series",
+          "factoryId": "Meter.Schneider.PM2000Series"
+        },
+        {
+          "name": "ABB B23 M-Bus",
+          "factoryId": "Meter.ABB.B23"
+        },
+        {
+          "name": "Artel MDM3100",
+          "factoryId": "Meter.Artel.MDM3100"
+        },
+        {
+          "name": "Artemes AM-2",
+          "factoryId": "Meter.Artemes.AM2"
+        },
+        {
+          "name": "B-Control EM300",
+          "factoryId": "Meter.BControl.EM300"
+        },
+        {
+          "name": "B+G E-Tech DRT428M-2",
+          "factoryId": "Meter.BGE-TECH.DRT428M2"
+        },
+        {
+          "name": "Camille Bauer APLUS",
+          "factoryId": "Meter.Camillebauer.Aplus"
+        },
+        {
+          "name": "Carlo Gavazzi EM100",
+          "factoryId": "Meter.CarloGavazzi.EM100"
+        },
+        {
+          "name": "Carlo Gavazzi EM300",
+          "factoryId": "Meter.CarloGavazzi.EM300"
+        },
+        {
+          "name": "Discovergy",
+          "factoryId": "Meter.Discovergy"
+        },
+        {
+          "name": "Eastron SDM 120",
+          "factoryId": "Meter.Eastron.SDM120"
+        },
+        {
+          "name": "Elecnova PD194Z Series",
+          "factoryId": "Meter.Elecnova.PD194Z"
+        },
+        {
+          "name": "Janitza UMG 104",
+          "factoryId": "Meter.Janitza.UMG104"
+        },
+        {
+          "name": "Janitza UMG 511",
+          "factoryId": "Meter.Janitza.UMG511"
+        },
+        {
+          "name": "Janitza UMG 604",
+          "factoryId": "Meter.Janitza.UMG604"
+        },
+        {
+          "name": "Janitza UMG 96RM-E",
+          "factoryId": "Meter.Janitza.UMG96RME"
+        },
+        {
+          "name": "KDK 2PU CT",
+          "factoryId": "Meter.KDK.2PUCT"
+        },
+        {
+          "name": "Eastron SDM 630",
+          "factoryId": "Meter.Microcare.SDM630"
+        },
+        {
+          "name": "Phoenix Contact",
+          "factoryId": "Meter.PhoenixContact"
+        },
+        {
+          "name": "Plexlog Datalogger",
+          "factoryId": "Meter.Plexlog.Datalogger"
+        },
+        {
+          "name": "PQ-Plus UMD 96",
+          "factoryId": "Meter.PqPlus.UMD96"
+        },
+        {
+          "name": "PQ-Plus UMD 97",
+          "factoryId": "Meter.PqPlus.UMD97"
+        },
+        {
+          "name": "Schneider Acti9 Smartlink",
+          "factoryId": "Meter.Schneider.Acti9.Smartlink"
+        },
+        {
+          "name": "Siemens PAC Series",
+          "factoryId": "Meter.Siemens"
+        },
+        {
+          "name": "Siemens PAC1600",
+          "factoryId": "Meter.Siemens.PAC1600"
+        },
+        {
+          "name": "Siemens SICAMT7KG966",
+          "factoryId": "Meter.Siemens.SICAMT7KG966"
+        },
+        {
+          "name": "SMA Sunny Home Manager 2.0",
+          "factoryId": "Meter.SMA.SHM20"
+        },
+        {
+          "name": "Socomec Singlephase",
+          "factoryId": "Meter.Socomec.Singlephase"
+        },
+        {
+          "name": "Socomec Threephase",
+          "factoryId": "Meter.Socomec.Threephase"
+        },
+        {
+          "name": "Virtual Add",
+          "factoryId": "Meter.Virtual.Add"
+        },
+        {
+          "name": "Virtual Subtract",
+          "factoryId": "Meter.Virtual.Subtract"
+        },
+        {
+          "name": "Weidmueller 525",
+          "factoryId": "Meter.Weidmueller.525"
+        },
+        {
+          "name": "Ziehl EFR4001IP",
+          "factoryId": "Meter.Ziehl.EFR4001IP"
+        },
+        {
+          "name": "Solar Edge (Inverter)",
+          "factoryId": "Meter.SolarEdge.Modbus"
+        },
+        {
+          "name": "Huawei Meter (Smart Logger)",
+          "factoryId": "smartlogger.meter.huawei"
+        },
+        {
+          "name": "Meter OneController",
+          "factoryId": "Meter.OneController"
+        },
+        {
+          "name": "Foxess",
+          "factoryId": "Meter.Logger.Foxess"
+        }
+      ]
+    },
+    "storageSetup": {
+      "storageBrands": [
+        {
+          "name": "Battery BMW",
+          "factoryId": "Battery.BMW"
+        },
+        {
+          "name": "Battery FENECON Commercial",
+          "factoryId": "Battery.Fenecon.Commercial"
+        },
+        {
+          "name": "Battery FENECON Home",
+          "factoryId": "Battery.Fenecon.Home"
+        },
+        {
+          "name": "Battery Pylontech Powercube M2",
+          "factoryId": "Battery.Pylontech"
+        },
+        {
+          "name": "Battery Soltaro Cluster C",
+          "factoryId": "Battery.Soltaro.Cluster.VersionC"
+        },
+        {
+          "name": "Battery BYD Commercial C130",
+          "factoryId": "Byd.BatteryBox.Commercial.C130"
+        }
+      ]
+    },
+    "smartLoggerSetup": {
+      "smartLoggerBrands": [
+        {
+          "name": "Huawei 3000A",
+          "factoryId": "Smart.Logger.Huawei.3000A"
+        },
+        {
+          "name": "Sungrow COM100",
+          "factoryId": "Smart.Logger.Sungrow"
+        },
+        {
+          "name": "Solis S3 Logger",
+          "factoryId": "Smart.Logger.Huawei.3000A"
+        },
+        {
+          "name": "Sigenergy SigenStorEC",
+          "factoryId": "Smart.Logger.Huawei.3000A"
+        },
+        {
+          "name": "Sigenergy Sigen Hybrid",
+          "factoryId": "Smart.Logger.Huawei.3000A"
+        },
+        {
+          "name": "Sigenergy Sigen PV Max",
+          "factoryId": "Smart.Logger.Huawei.3000A"
+        },
+        {
+          "name": "Foxess",
+          "factoryId": "Smart.Logger.Foxess"
+        }
+      ]
+    }
+  }
+}

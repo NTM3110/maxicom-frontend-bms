@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "device": {
+    "product": "bms",
+    "name": "MAXiCom BMS",
+    "title": "Battery Monitoring System",
+    "subtitle": "Battery monitoring and management"
+  },
+  "navigation": {
+    "defaultItem": "dashboard",
+    "enabledItems": [
+      "dashboard",
+	  "system-info",
+      "battery-strings",
+      "assets",
+      "serial-tcp",
+      "network",
+      "calibration",
+      "alerts",
+      "maintenance"
+    ]
+  },
+  "connectivity": {
+    "serial": true,
+    "tcp": false
+  },
+  "systemInfo": {
+    "hardwareModel": "MAXiCom BMS Controller",
+    "firmwareVersion": "1.0.1",
+    "softwareVersion": "MAXiCom Platform 1.0"
+  }
+}
