@@ -1,4 +1,8 @@
-# sv
+# MAXiCom Frontend
+
+Unified SvelteKit frontend for MAXiCom BMS and MAXiCom RTS deployments.
+
+The default local sign-in is `admin / admin`. Deployment behavior, enabled menus, device catalogs and the shared sign-in account are controlled through `static/config/device-config.json`; see `CONFIGURATION.md` for details.
 
 Everything you need to build a Svelte project, powered by [`sv`](https://github.com/sveltejs/cli).
 

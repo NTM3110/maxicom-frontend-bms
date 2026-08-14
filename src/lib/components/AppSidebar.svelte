@@ -6,12 +6,14 @@
 		collapsed = false,
 		activeItem = 'dashboard',
 		groups,
-		onSelect
+		onSelect,
+		onSignOut
 	}: {
 		collapsed?: boolean;
 		activeItem?: string;
 		groups: { label?: string; items: NavigationItem[] }[];
 		onSelect: (item: NavigationItem) => void;
+		onSignOut: () => void;
 	} = $props();
 
 	function select(item: NavigationItem) {
@@ -56,7 +58,7 @@
 		<button class="navigation-item" type="button" title={collapsed ? 'Settings' : undefined}>
 			<Settings size={20} strokeWidth={2} aria-hidden="true" /><span>Settings</span>
 		</button>
-		<button class="navigation-item sign-out" type="button" title={collapsed ? 'Sign out' : undefined}>
+		<button class="navigation-item sign-out" type="button" onclick={onSignOut} title={collapsed ? 'Sign out' : undefined}>
 			<LogOut size={20} strokeWidth={2} aria-hidden="true" /><span>Sign out</span>
 		</button>
 	</div>

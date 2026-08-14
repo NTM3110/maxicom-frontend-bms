@@ -16,6 +16,9 @@ export type DeviceConfig = {
 		serial: boolean;
 		tcp: boolean;
 	};
+	authentication?: {
+		defaultUser: { username: string; passwordHash: string };
+	};
 	systemInfo?: {
 		hardwareModel?: string;
 		firmwareVersion?: string;
@@ -55,6 +58,12 @@ const defaultConfig: DeviceConfig = {
 	connectivity: {
 		serial: true,
 		tcp: true
+	},
+	authentication: {
+		defaultUser: {
+			username: 'admin',
+			passwordHash: '8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918'
+		}
 	}
 };
 

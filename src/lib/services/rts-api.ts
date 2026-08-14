@@ -1,3 +1,5 @@
+import { rtsApiPath, rtsWebSocketUrl as resolveRtsWebSocketUrl } from '$lib/services/backend-settings';
+
 export type RtsProperty = { name: string; value: unknown };
 
 export type RtsComponent = {
@@ -63,17 +65,12 @@ function errorMessage(value: unknown, fallback: string) {
 	return value instanceof Error ? value.message : fallback;
 }
 
-const rtsApiPrefix = String(import.meta.env.VITE_RTS_API_PREFIX ?? '').replace(/\/$/, '');
-
 function rtsPath(path: string) {
-	return `${rtsApiPrefix}${path}`;
+	return rtsApiPath(path);
 }
 
 function rtsWebSocketUrl() {
-	const configuredUrl = String(import.meta.env.VITE_RTS_WS_URL ?? '').trim();
-	if (configuredUrl) return configuredUrl;
-	const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-	return `${protocol}//${window.location.host}${rtsPath('/jsonrpc')}`;
+	return resolveRtsWebSocketUrl();
 }
 
 function toForm(config: Record<string, unknown>, arraysAsCsv = true) {
@@ -100,6 +97,7 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
 class RtsRpcClient {
 	private socket: WebSocket | null = null;
 	private connecting: Promise<void> | null = null;
+	private generation = 0;
 	private pending = new Map<string, { resolve: (value: unknown) => void; reject: (reason: Error) => void; timer: ReturnType<typeof setTimeout> }>();
 
 	private async connect() {
@@ -107,11 +105,13 @@ class RtsRpcClient {
 		if (this.socket?.readyState === WebSocket.OPEN) return;
 		if (this.connecting) return this.connecting;
 
+		const generation = ++this.generation;
 		this.connecting = new Promise<void>((resolve, reject) => {
 			const socket = new WebSocket(rtsWebSocketUrl());
 			this.socket = socket;
 
 			socket.onmessage = (event) => {
+				if (generation !== this.generation) return;
 				let message: RpcResponse;
 				try { message = JSON.parse(event.data as string) as RpcResponse; } catch { return; }
 				if (!message.id) return;
@@ -123,8 +123,11 @@ class RtsRpcClient {
 				else waiter.resolve(message.result);
 			};
 
-			socket.onerror = () => reject(new Error('Cannot connect to the RTS JSON-RPC service.'));
+			socket.onerror = () => {
+				if (generation === this.generation) reject(new Error('Cannot connect to the RTS JSON-RPC service.'));
+			};
 			socket.onclose = () => {
+				if (generation !== this.generation) return;
 				this.socket = null;
 				this.connecting = null;
 				for (const waiter of this.pending.values()) {
@@ -134,6 +137,10 @@ class RtsRpcClient {
 				this.pending.clear();
 			};
 			socket.onopen = () => {
+				if (generation !== this.generation) {
+					socket.close();
+					return;
+				}
 				void this.sendRaw('authenticateWithPassword', { username: 'admin', password: 'admin' })
 					.then(() => resolve())
 					.catch(reject);
@@ -172,9 +179,31 @@ class RtsRpcClient {
 			payload: { jsonrpc: '2.0', id: innerId, method, params }
 		});
 	}
+
+	reset() {
+		this.generation += 1;
+		const socket = this.socket;
+		this.socket = null;
+		this.connecting = null;
+		for (const waiter of this.pending.values()) {
+			clearTimeout(waiter.timer);
+			waiter.reject(new Error('RTS JSON-RPC connection restarted.'));
+		}
+		this.pending.clear();
+		if (socket && (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN)) socket.close();
+	}
 }
 
 const rpcClient = new RtsRpcClient();
+
+export function resetRtsConnection() {
+	rpcClient.reset();
+}
+
+export async function checkRtsConnection() {
+	await rpcClient.edgeRpc('getEdgeConfig');
+	return true;
+}
 
 export function unwrapEdgeConfig(response: unknown): RtsEdgeConfig {
 	const value = response as Record<string, any> | null;
