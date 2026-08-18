@@ -5,6 +5,7 @@
 	import CalibrationEventReport from './CalibrationEventReport.svelte';
 	import InitialBaselinePreview from './InitialBaselinePreview.svelte';
 	import BmsCompactCellVoltageTable from './BmsCompactCellVoltageTable.svelte';
+	import { createInitialBaselineDemoTicket, loadInitialBaselineDemoTicket, removeInitialBaselineDemoTicket as clearInitialBaselineDemoTicket, saveInitialBaselineDemoTicket, type InitialBaselineDemoTicket } from './initial-baseline-demo';
 	import { formatCalibrationTime } from '$lib/services/calibration-time';
 	import {
 		appendCalibrationEvidence,
@@ -51,6 +52,7 @@
 	let workflowOpen = $state(false);
 	let reportOpen = $state(false);
 	let baselinePreviewOpen = $state(false);
+	let initialBaselineTicket = $state<InitialBaselineDemoTicket | null>(null);
 	let selectedCreateType = $state<'INITIAL_BASELINE' | 'MONTHLY_INSPECTION'>('MONTHLY_INSPECTION');
 
 	let selectedString = $derived(strings.find((item) => item.stringIndex === selectedStringIndex) ?? null);
@@ -78,6 +80,7 @@
 			strings = availableStrings;
 			currentDirection = config.dischargeCurrentDirection;
 			selectedStringIndex = strings[0]?.stringIndex ?? 0;
+			initialBaselineTicket = selectedStringIndex ? loadInitialBaselineDemoTicket(selectedStringIndex) : null;
 			if (selectedStringIndex) await loadLatest();
 		} catch (cause) {
 			error = message(cause);
@@ -90,6 +93,7 @@
 		workflowOpen = false;
 		reportOpen = false;
 		baselinePreviewOpen = false;
+		initialBaselineTicket = selectedStringIndex ? loadInitialBaselineDemoTicket(selectedStringIndex) : null;
 		event = null;
 		liveTelemetry = null;
 		events = [];
@@ -176,12 +180,35 @@
 
 	function createSelectedEvent(eventType: 'INITIAL_BASELINE' | 'MONTHLY_INSPECTION') {
 		if (eventType === 'INITIAL_BASELINE') {
+			if (!selectedString) return;
+			const existing = loadInitialBaselineDemoTicket(selectedString.stringIndex);
+			initialBaselineTicket = existing ?? createInitialBaselineDemoTicket(selectedString.stringIndex, selectedString.stringName);
+			saveInitialBaselineDemoTicket(initialBaselineTicket);
 			baselinePreviewOpen = true;
 			error = '';
 			notice = '';
 			return;
 		}
 		void createDraft();
+	}
+
+	function updateInitialBaselineTicket(ticket: InitialBaselineDemoTicket) {
+		initialBaselineTicket = ticket;
+		saveInitialBaselineDemoTicket(ticket);
+	}
+
+	function resumeInitialBaselineTicket() {
+		if (!initialBaselineTicket) return;
+		baselinePreviewOpen = true;
+		reportOpen = false;
+		workflowOpen = false;
+	}
+
+	function removeInitialBaselineTicket() {
+		if (!initialBaselineTicket) return;
+		clearInitialBaselineDemoTicket(initialBaselineTicket.stringIndex);
+		initialBaselineTicket = null;
+		notice = 'Initial Baseline demo ticket was removed.';
 	}
 
 	async function startEvent() {
@@ -483,26 +510,25 @@
 </script>
 
 <section class="page">
-	<header class="page-head">
+	{#if !baselinePreviewOpen}<header class="page-head">
 		<div>
-			<span class="eyebrow">BMS / OPERATIONS</span>
 			<h2><ClipboardList size={25} />Calibration Event</h2>
-			<p>{baselinePreviewOpen ? 'Read-only Initial Baseline presentation preview.' : workflowOpen ? 'Stage state, tasks, actions, and version always come from the backend.' : reportOpen ? 'Completed event report.' : 'Create, find, and review server-managed calibration events.'}</p>
+			<p>{workflowOpen ? 'Stage state, tasks, actions, and version always come from the backend.' : reportOpen ? 'Completed event report.' : 'Create, find, and review calibration events.'}</p>
 		</div>
 		{#if workflowOpen}<button class="secondary" disabled={loading || mutating} onclick={returnToManagement}>Back to Event Management</button>{/if}
-	</header>
+	</header>{/if}
 
 	{#if error}<div class="banner error"><AlertTriangle size={18} /><span>{error}</span></div>{/if}
 	{#if notice}<div class="banner notice"><CheckCircle2 size={18} /><span>{notice}</span></div>{/if}
 
 
 	{#if !workflowOpen && !reportOpen && !baselinePreviewOpen}
-		<CalibrationEventManagement {strings} {selectedStringIndex} {events} {selectedEventId} {currentDirection} {selectedCreateType} {loading} {mutating}
-			onStringChange={changeString} onCreateTypeChange={changeCreateType} onEventSelect={changeSelectedEvent} onStartDraft={startDraftFromManagement} onCreate={createSelectedEvent} onReload={loadLatest} />
+		<CalibrationEventManagement {strings} {selectedStringIndex} {events} {selectedEventId} {currentDirection} {selectedCreateType} {initialBaselineTicket} {loading} {mutating}
+			onStringChange={changeString} onCreateTypeChange={changeCreateType} onEventSelect={changeSelectedEvent} onStartDraft={startDraftFromManagement} onCreate={createSelectedEvent} onResumeInitialBaseline={resumeInitialBaselineTicket} onRemoveInitialBaseline={removeInitialBaselineTicket} onReload={loadLatest} />
 	{/if}
 
 	{#if baselinePreviewOpen}
-		<InitialBaselinePreview stringName={selectedString?.stringName ?? 'Battery string'} onBack={returnToManagement} />
+		{#if initialBaselineTicket}<InitialBaselinePreview stringName={selectedString?.stringName ?? 'Battery string'} batteryString={selectedString} ticket={initialBaselineTicket} onTicketChange={updateInitialBaselineTicket} onBack={returnToManagement} />{/if}
 	{:else if reportOpen && event?.closedAt}
 		<CalibrationEventReport {event} onBack={returnToManagement} />
 	{:else if !workflowOpen && loading && !event}
@@ -733,4 +759,22 @@
 		.terminal-audit div { display: grid; gap: 5px; }
 		.terminal-audit dd { text-align: left; }
 	}
+	/* Keep the operational workspace calm: surface separation comes from tone, not heavy outlines. */
+	.panel,.workspace-panel{border-color:#edf1f6;box-shadow:0 12px 30px rgba(35,54,89,.055)}
+	.page-head h2,.section-head h3{font-weight:500}
+	.eyebrow{font-weight:600}
+	.status,.stage-counter{font-weight:600}
+	label,.primary,.secondary{font-weight:500}
+	select,input{border-color:#e4eaf2;border-radius:9px;background-color:#fbfcfe;box-shadow:inset 0 1px 2px rgba(35,54,89,.025);transition:border-color .16s ease,box-shadow .16s ease,background-color .16s ease}
+	select{appearance:none;padding-right:38px;background-image:linear-gradient(45deg,transparent 50%,#71809a 50%),linear-gradient(135deg,#71809a 50%,transparent 50%);background-position:calc(100% - 17px) 18px,calc(100% - 12px) 18px;background-size:5px 5px,5px 5px;background-repeat:no-repeat}
+	select:hover,input:hover{border-color:#c7d4e5;background-color:#fff}
+	select:focus,input:focus{outline:none;border-color:#7e9fd3;background-color:#fff;box-shadow:0 0 0 3px rgba(50,99,174,.12)}
+	select option{color:#2d405e;background:#fff;font-weight:400}
+	.secondary{border-color:transparent;background:#f4f7fb}
+	.secondary:hover:not(:disabled){background:#eaf0f8}
+	.event-summary dl div,.monthly-live,.redo-stage{border-color:transparent;background:#f7f9fc}
+	.monthly-live{box-shadow:inset 0 0 0 1px #edf1f6}
+	.live-heading,.cell-voltage-head{background:#f5f8fc}
+	.evidence-row{border-color:transparent;background:#f7f9fc}
+	.stepper{border-color:#edf1f6;box-shadow:0 5px 18px rgba(35,54,89,.025)}
 </style>
