@@ -46,7 +46,7 @@ export const navigationGroups: { label?: string; items: NavigationItem[] }[] = [
 		label: 'OPERATIONS',
 		items: [
 			{ id: 'hybrid-controller', label: 'Hybrid Controller', icon: SlidersHorizontal },
-			{ id: 'calibration', label: 'Discharge Calibration', icon: ChartNoAxesCombined }
+			{ id: 'calibration', label: 'Calibration Event', icon: ChartNoAxesCombined }
 		]
 	},
 	{
