@@ -51,7 +51,7 @@ export const navigationGroups: { label?: string; items: NavigationItem[] }[] = [
 	},
 	{
 		label: 'MANAGEMENT',
-		items: [{ id: 'assets', label: 'Asset Management', icon: HardDrive }]
+		items: [{ id: 'assets', label: 'System Info', icon: HardDrive }]
 	},
 	{
 		label: 'CONNECTIVITY',

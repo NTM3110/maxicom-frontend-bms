@@ -4,11 +4,14 @@
 	import CalibrationEventManagement from './CalibrationEventManagement.svelte';
 	import CalibrationEventReport from './CalibrationEventReport.svelte';
 	import InitialBaselinePreview from './InitialBaselinePreview.svelte';
+	import { initialBaselineStep, type InitialBaselineRealAdapter } from './initial-baseline-real';
 	import BmsCompactCellVoltageTable from './BmsCompactCellVoltageTable.svelte';
 	import { createInitialBaselineDemoTicket, loadInitialBaselineDemoTicket, removeInitialBaselineDemoTicket as clearInitialBaselineDemoTicket, saveInitialBaselineDemoTicket, type InitialBaselineDemoTicket } from './initial-baseline-demo';
 	import { formatCalibrationTime } from '$lib/services/calibration-time';
 	import {
 		appendCalibrationEvidence,
+		configureCalibrationFloatStablePolicy,
+		configureCalibrationDemoTimeScale,
 		createCalibrationEvent,
 		executeCalibrationStageAction,
 		getCalibrationEvent,
@@ -16,15 +19,19 @@
 		getBmsStringTelemetry,
 		listBmsStrings,
 		listCalibrationEvents,
+		loadCalibrationHistory,
+		loadCalibrationSamples,
 		monthlyInspectionAssessment,
 		redoCalibrationStage,
 		startCalibrationEvent,
+		startCalibrationProcess,
+		completeCalibrationProcess,
 		type BatteryString,
 		type BmsStringTelemetry,
 		type CalibrationAllowedAction,
 		type CalibrationEventDetail,
 		type CalibrationEventSummary,
-		type CalibrationStage,
+		type CalibrationStage, type CalibrationManualEvidence, type CalibrationSample,
 		type DischargeCurrentDirection
 	} from '$lib/services/bms-api';
 
@@ -35,6 +42,8 @@
 	let selectedEventId = $state(0);
 	let event = $state<CalibrationEventDetail | null>(null);
 	let liveTelemetry = $state<BmsStringTelemetry | null>(null);
+	let initialBaselineEvidence = $state<CalibrationManualEvidence[]>([]);
+	let initialBaselineSamples = $state<CalibrationSample[]>([]);
 	let cellVoltagesExpanded = $state(false);
 	let loading = $state(true);
 	let mutating = $state(false);
@@ -54,7 +63,6 @@
 	let baselinePreviewOpen = $state(false);
 	let initialBaselineTicket = $state<InitialBaselineDemoTicket | null>(null);
 	let selectedCreateType = $state<'INITIAL_BASELINE' | 'MONTHLY_INSPECTION'>('MONTHLY_INSPECTION');
-
 	let selectedString = $derived(strings.find((item) => item.stringIndex === selectedStringIndex) ?? null);
 	let currentStage = $derived(event?.stages.find((stage) => stage.calibrationStageId === event?.currentStageId) ?? null);
 	let viewedStage = $derived(event?.stages.find((stage) => stage.calibrationStageId === viewedStageId) ?? currentStage);
@@ -65,6 +73,21 @@
 	let canRedoViewedStage = $derived(!!event && !!viewedStage && !!currentStage && !event.closedAt
 		&& ['ACTIVE', 'BLOCKED', 'REVALIDATION_REQUIRED'].includes(event.status)
 		&& viewedStage.state === 'COMPLETED' && viewedStage.order < currentStage.order);
+	let initialBaselineRedoStage = $derived(event?.eventType === 'INITIAL_BASELINE' && currentStage
+		? event.stages.filter((stage) => stage.state === 'COMPLETED' && stage.order < currentStage.order).at(-1) ?? null
+		: null);
+	let canRedoInitialBaselineStage = $derived(!!event && !!currentStage && !!initialBaselineRedoStage && !event.closedAt
+		&& ['ACTIVE', 'BLOCKED', 'REVALIDATION_REQUIRED'].includes(event.status));
+	let realInitialBaselineTicket = $derived(event?.eventType === 'INITIAL_BASELINE' ? mapRealInitialBaselineTicket(event, initialBaselineEvidence, initialBaselineSamples) : null);
+	let realInitialBaselineAdapter = $derived<InitialBaselineRealAdapter | null>(event?.eventType === 'INITIAL_BASELINE' ? {
+		event, evidence: initialBaselineEvidence, samples: initialBaselineSamples, telemetry: liveTelemetry, busy: loading || mutating,
+		onEvidence: recordRealInitialBaselineEvidence, onStartProcess: startRealInitialBaselineProcess,
+		onConfigureDemoTimeScale: configureRealInitialBaselineDemoTimeScale,
+		onConfigureFloatStablePolicy: configureRealInitialBaselineFloatStablePolicy,
+		onCompleteProcess: completeRealInitialBaselineProcess, onContinue: continueRealInitialBaseline,
+		onExecuteAction: executeRealInitialBaselineAction, onRedoStage: redoRealInitialBaselineStage,
+		canRedoStage: canRedoInitialBaselineStage
+	} : null);
 
 	onMount(() => {
 		void initialise();
@@ -155,6 +178,20 @@
 		} else if (pendingDangerAction) {
 			pendingDangerAction = detail.allowedActions.find((action) => action.actionCode === pendingDangerAction?.actionCode) ?? null;
 		}
+		if (detail.eventType === 'INITIAL_BASELINE') void syncInitialBaselineReadback(detail);
+	}
+
+	async function syncInitialBaselineReadback(detail: CalibrationEventDetail) {
+		try {
+			const [history, samples] = await Promise.all([
+				loadCalibrationHistory(detail.calibrationEventId), loadCalibrationSamples(detail.calibrationEventId)
+			]);
+			if (event?.calibrationEventId !== detail.calibrationEventId || event.eventVersion !== detail.eventVersion) return;
+			initialBaselineEvidence = history.evidence;
+			initialBaselineSamples = samples;
+		} catch (cause) {
+			if (event?.calibrationEventId === detail.calibrationEventId) error = message(cause);
+		}
 	}
 
 	async function createDraft() {
@@ -163,7 +200,9 @@
 		error = '';
 		notice = '';
 		try {
-			const created = await createCalibrationEvent({ stringIndex: selectedStringIndex, eventType: 'MONTHLY_INSPECTION', currentDirection });
+			const created = selectedCreateType === 'INITIAL_BASELINE'
+				? await createCalibrationEvent({ stringIndex: selectedStringIndex, eventType: 'INITIAL_BASELINE', currentDirection, dischargeMethod: 'C10', dischargeEndpointMode: 'FULL_CUTOFF' })
+				: await createCalibrationEvent({ stringIndex: selectedStringIndex, eventType: 'MONTHLY_INSPECTION', currentDirection });
 			applyEvent(created, true);
 			workflowOpen = false;
 			notice = `Draft event ${created.calibrationEventId} was created.`;
@@ -179,22 +218,23 @@
 	}
 
 	function createSelectedEvent(eventType: 'INITIAL_BASELINE' | 'MONTHLY_INSPECTION') {
-		if (eventType === 'INITIAL_BASELINE') {
-			if (!selectedString) return;
-			const existing = loadInitialBaselineDemoTicket(selectedString.stringIndex);
-			initialBaselineTicket = existing ?? createInitialBaselineDemoTicket(selectedString.stringIndex, selectedString.stringName);
-			saveInitialBaselineDemoTicket(initialBaselineTicket);
-			baselinePreviewOpen = true;
-			error = '';
-			notice = '';
-			return;
-		}
 		void createDraft();
 	}
 
 	function updateInitialBaselineTicket(ticket: InitialBaselineDemoTicket) {
 		initialBaselineTicket = ticket;
 		saveInitialBaselineDemoTicket(ticket);
+	}
+
+	function startInitialBaselineDemo() {
+		if (!selectedString) return;
+		const existing = loadInitialBaselineDemoTicket(selectedString.stringIndex);
+		initialBaselineTicket = existing ?? createInitialBaselineDemoTicket(selectedString.stringIndex, selectedString.stringName);
+		saveInitialBaselineDemoTicket(initialBaselineTicket);
+		baselinePreviewOpen = true;
+		workflowOpen = false;
+		reportOpen = false;
+		error = '';
 	}
 
 	function resumeInitialBaselineTicket() {
@@ -421,6 +461,143 @@
 		}
 	}
 
+	function mapRealInitialBaselineTicket(detail: CalibrationEventDetail, evidence: CalibrationManualEvidence[], samples: CalibrationSample[]): InitialBaselineDemoTicket {
+		const seed = createInitialBaselineDemoTicket(selectedStringIndex, selectedString?.stringName ?? detail.configuration.stringKey);
+		const has = (type: string) => evidence.some((item) => item.evidenceType === type && ['PASS', 'RECORDED'].includes(item.status));
+		const process = (type: string) => detail.processes.find((item) => item.type === type);
+		const completed = (type: string) => process(type)?.state === 'COMPLETED';
+		const vocProcess = process('VOC_BASELINE_CAPTURE');
+		const voc = vocProcess?.state === 'COMPLETED' ? samples.filter((item) => item.calibrationProcessId === vocProcess.calibrationProcessId
+			&& item.processAttemptNumber === vocProcess.attemptNumber && item.persistenceReason === 'FINAL_SNAPSHOT').sort((a, b) => a.sampleId - b.sampleId).at(-1) : null;
+		const ripple = evidence.filter((item) => item.evidenceType === 'RIPPLE_AFTER_LOAD' && item.numericValue != null).at(-1)?.numericValue;
+		return {
+			...seed, id: `#${detail.calibrationEventId}`, currentStep: initialBaselineStep(detail),
+			status: detail.closedAt ? 'COMPLETED' : 'IN_PROGRESS', completedAt: detail.closedAt ? Date.parse(detail.closedAt) : null,
+			floatStableDurationMinutes: detail.configuration.floatStableDurationMinutes,
+			floatVoltageToleranceV: detail.configuration.floatVoltageToleranceV,
+			floatCurrentMinA: detail.configuration.floatCurrentMinA,
+			floatCurrentMaxA: detail.configuration.floatCurrentMaxA,
+			initialSettingsVerified: has('CHARGE_SETPOINTS_REVIEWED'),
+			boostStartedAt: process('BOOST_CHARGE_TO_VBOOST')?.state === 'NOT_STARTED' ? null : 1,
+			boostConfirmed: has('BOOST_TARGET_REVIEWED'), boostConfirmedAt: completed('BOOST_CHARGE_TO_VBOOST') ? 1 : null,
+			floatStableStartedAt: process('FLOAT_SETTLEMENT_TO_VFLOAT')?.state === 'NOT_STARTED' ? null : 1,
+			floatConfirmed: has('FLOAT_MODE_REVIEWED'), cooldownStartedAt: process('COOL_DOWN_TO_AMBIENT')?.state === 'NOT_STARTED' ? null : 1,
+			recoveryMcbClosed: has('RECOVERY_CHARGER_MCB_CLOSED_CONFIRMED'), recoverySettingsVerified: has('RECOVERY_CHARGE_SETPOINTS_REVIEWED'),
+			recoveryStartedAt: process('RECOVERY_CHARGE_TO_VBOOST')?.state === 'NOT_STARTED' ? null : 1,
+			recoveryFloatStartedAt: process('RECOVERY_FLOAT_STABILIZATION')?.state === 'NOT_STARTED' ? null : 1,
+			recoveryFloatStableStartedAt: process('RECOVERY_FLOAT_STABILIZATION')?.state === 'NOT_STARTED' ? null : 1,
+			recoveryFloatConfirmed: has('RECOVERY_FLOAT_STABILITY_REVIEWED'), resistanceMeasured: has('CELL_RESISTANCE_SAMPLE_REVIEWED'),
+			loadConnectedForRipple: has('LOAD_CONNECTED_CONFIRMATION'), rippleWithLoad: ripple == null ? '' : String(ripple),
+			rippleWithLoadMeasured: has('RIPPLE_AFTER_LOAD'), chargerOpenedForVoc: has('CHARGER_MCB_OPEN_CONFIRMATION'),
+			vocCaptureStartedAt: voc?.measurementTime ? Date.parse(voc.measurementTime) : null,
+			vocSnapshot: voc ? { capturedAt: Date.parse(voc.measurementTime ?? voc.createdAt ?? '') || Date.now(), stringVoltageV: voc.stringVoltageV ?? 0,
+				cells: voc.cells.map((cell) => ({ cellId: cell.cellIndex, voltageV: cell.voltageV ?? 0 })) } : null,
+			vocBaselineConfirmed: has('VOC_BASELINE_CONFIRMATION')
+		};
+	}
+
+	async function recordRealInitialBaselineEvidence(type: string, value?: number, unit?: string, sampleId?: number) {
+		if (!event || !currentStage || event.eventType !== 'INITIAL_BASELINE' || mutating) return;
+		const previous = event;
+		mutating = true;
+		error = '';
+		try {
+			applyEvent(await appendCalibrationEvidence({ calibrationEventId: event.calibrationEventId,
+				calibrationStageId: currentStage.calibrationStageId, expectedEventVersion: event.eventVersion,
+				evidenceType: type, status: 'PASS', ...(value !== undefined ? { numericValue: value, unit } : { textValue: 'Confirmed' }),
+				...(sampleId !== undefined ? { calibrationSampleId: sampleId } : {}) }));
+		} catch (cause) { await recoverAfterMutationFailure(cause, previous); }
+		finally { mutating = false; }
+	}
+
+	async function configureRealInitialBaselineDemoTimeScale(factor: 1 | 60) {
+		if (!event || !currentStage || event.eventType !== 'INITIAL_BASELINE'
+			|| currentStage.type !== 'PREREQUISITES' || mutating) return;
+		const previous = event;
+		mutating = true;
+		error = '';
+		try {
+			applyEvent(await configureCalibrationDemoTimeScale({
+				calibrationEventId: event.calibrationEventId,
+				calibrationStageId: currentStage.calibrationStageId,
+				expectedEventVersion: event.eventVersion,
+				demoTimeScaleFactor: factor
+			}));
+		} catch (cause) { await recoverAfterMutationFailure(cause, previous); }
+		finally { mutating = false; }
+	}
+
+	async function configureRealInitialBaselineFloatStablePolicy(policy: {
+		durationMinutes: number; voltageToleranceV: number; currentMinA: number; currentMaxA: number;
+	}) {
+		if (!event || !currentStage || event.eventType !== 'INITIAL_BASELINE'
+			|| currentStage.type !== 'INITIAL_CHARGE' || mutating) return;
+		const previous = event;
+		mutating = true;
+		error = '';
+		try {
+			applyEvent(await configureCalibrationFloatStablePolicy({
+				calibrationEventId: event.calibrationEventId,
+				calibrationStageId: currentStage.calibrationStageId,
+				expectedEventVersion: event.eventVersion,
+				floatStableDurationMinutes: policy.durationMinutes,
+				floatVoltageToleranceV: policy.voltageToleranceV,
+				floatCurrentMinA: policy.currentMinA,
+				floatCurrentMaxA: policy.currentMaxA
+			}));
+		} catch (cause) { await recoverAfterMutationFailure(cause, previous); }
+		finally { mutating = false; }
+	}
+
+	async function mutateRealInitialBaselineProcess(type: string, complete: boolean) {
+		if (!event || !currentStage || mutating) return;
+		const process = event.processes.find((item) => item.type === type && item.calibrationStageId === currentStage.calibrationStageId);
+		if (!process || (!complete && process.state !== 'NOT_STARTED') || (complete && process.state !== 'ACTIVE')) return;
+		const previous = event;
+		mutating = true; error = '';
+		try {
+			applyEvent(complete
+				? await completeCalibrationProcess(event.calibrationEventId, currentStage.calibrationStageId, process.calibrationProcessId, event.eventVersion)
+				: await startCalibrationProcess(event.calibrationEventId, currentStage.calibrationStageId, process.calibrationProcessId, event.eventVersion));
+		} catch (cause) { await recoverAfterMutationFailure(cause, previous); }
+		finally { mutating = false; }
+	}
+
+	function startRealInitialBaselineProcess(type: string) { void mutateRealInitialBaselineProcess(type, false); }
+	function completeRealInitialBaselineProcess(type: string) { void mutateRealInitialBaselineProcess(type, true); }
+	function continueRealInitialBaseline() {
+		const action = event?.allowedActions.find((item) => item.actionCode === 'COMPLETE_STAGE');
+		if (action) void executeAction(action);
+	}
+
+	async function executeRealInitialBaselineAction(action: CalibrationAllowedAction, reason: string, acknowledged: string[]) {
+		if (!event || !currentStage || event.eventType !== 'INITIAL_BASELINE' || mutating || !action.enabled
+			|| (action.requiresReason && !reason.trim())
+			|| (action.requiresAcknowledgement && !action.acknowledgementItems.every((item) => acknowledged.includes(item)))) return;
+		const previous = event;
+		mutating = true;
+		error = '';
+		notice = '';
+		try {
+			applyEvent(await executeCalibrationStageAction(event.calibrationEventId, currentStage.calibrationStageId,
+				action.actionCode, event.eventVersion, reason, acknowledged), true);
+		} catch (cause) { await recoverAfterMutationFailure(cause, previous); }
+		finally { mutating = false; }
+	}
+
+	async function redoRealInitialBaselineStage(reason: string) {
+		if (!event || !initialBaselineRedoStage || !canRedoInitialBaselineStage || !reason.trim() || mutating) return;
+		const previous = event;
+		mutating = true;
+		error = '';
+		notice = '';
+		try {
+			applyEvent(await redoCalibrationStage(event.calibrationEventId, initialBaselineRedoStage.calibrationStageId,
+				event.eventVersion, reason), true);
+		} catch (cause) { await recoverAfterMutationFailure(cause, previous); }
+		finally { mutating = false; }
+	}
+
 	function actionReady(action: CalibrationAllowedAction) {
 		return action.enabled && (!action.requiresReason || actionReason.trim().length > 0)
 			&& (!action.requiresAcknowledgement || action.acknowledgementItems.every((item) => acknowledgedItems.includes(item)));
@@ -524,11 +701,13 @@
 
 	{#if !workflowOpen && !reportOpen && !baselinePreviewOpen}
 		<CalibrationEventManagement {strings} {selectedStringIndex} {events} {selectedEventId} {currentDirection} {selectedCreateType} {initialBaselineTicket} {loading} {mutating}
-			onStringChange={changeString} onCreateTypeChange={changeCreateType} onEventSelect={changeSelectedEvent} onStartDraft={startDraftFromManagement} onCreate={createSelectedEvent} onResumeInitialBaseline={resumeInitialBaselineTicket} onRemoveInitialBaseline={removeInitialBaselineTicket} onReload={loadLatest} />
+			onStringChange={changeString} onCreateTypeChange={changeCreateType} onEventSelect={changeSelectedEvent} onStartDraft={startDraftFromManagement} onCreate={createSelectedEvent} onDemo={startInitialBaselineDemo} onResumeInitialBaseline={resumeInitialBaselineTicket} onRemoveInitialBaseline={removeInitialBaselineTicket} onReload={loadLatest} />
 	{/if}
 
 	{#if baselinePreviewOpen}
 		{#if initialBaselineTicket}<InitialBaselinePreview stringName={selectedString?.stringName ?? 'Battery string'} batteryString={selectedString} ticket={initialBaselineTicket} onTicketChange={updateInitialBaselineTicket} onBack={returnToManagement} />{/if}
+	{:else if workflowOpen && event?.eventType === 'INITIAL_BASELINE' && realInitialBaselineTicket && realInitialBaselineAdapter}
+		{#key event.calibrationEventId}<InitialBaselinePreview stringName={selectedString?.stringName ?? event.configuration.stringKey} batteryString={selectedString} ticket={realInitialBaselineTicket} real={realInitialBaselineAdapter} onTicketChange={() => {}} onBack={returnToManagement} />{/key}
 	{:else if reportOpen && event?.closedAt}
 		<CalibrationEventReport {event} onBack={returnToManagement} />
 	{:else if !workflowOpen && loading && !event}
@@ -594,7 +773,7 @@
 							<div class="live-warning">Cell voltage data is incomplete or stale. The backend does not calculate a partial midpoint and keeps the stage blocked.</div>
 						{/if}
 						<div id="monthly-cell-voltages">
-							{#if cellVoltagesExpanded}<BmsCompactCellVoltageTable cells={liveTelemetry?.cells ?? []} ariaLabel="Live Monthly cell voltage" emptyMessage="No live cell voltage is available." />{/if}
+							{#if cellVoltagesExpanded}<BmsCompactCellVoltageTable cells={liveTelemetry?.cells ?? []} ariaLabel="Live Monthly cell voltage" emptyMessage="No live cell voltage is available." title="Cell Data · Voltage" expectedCount={selectedString?.cellQty ?? liveTelemetry?.cellQty ?? 0} />{/if}
 						</div>
 					</section>
 				{/if}

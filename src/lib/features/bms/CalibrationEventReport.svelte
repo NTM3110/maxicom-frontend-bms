@@ -177,6 +177,8 @@
 				cells={finalizedSample.cells.map((cell) => ({ id: cell.cellIndex, voltage: cell.voltageV, quality: cell.quality, availabilityWarning: cell.availabilityWarning }))}
 				ariaLabel="Persisted Monthly Inspection cell voltage"
 				emptyMessage="No persisted cell voltage was recorded for this snapshot."
+				title="Cell Data · Voltage"
+				expectedCount={typeof event.configuration.cellCount === 'number' ? event.configuration.cellCount : finalizedSample.cells.length}
 			/>
 		{/if}
 	</section>
