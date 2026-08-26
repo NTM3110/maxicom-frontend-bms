@@ -12,6 +12,7 @@
 		appendCalibrationEvidence,
 		configureCalibrationFloatStablePolicy,
 		configureCalibrationDemoTimeScale,
+		configureCalibrationDischargeSampling,
 		createCalibrationEvent,
 		executeCalibrationStageAction,
 		getCalibrationEvent,
@@ -83,7 +84,9 @@
 		event, evidence: initialBaselineEvidence, samples: initialBaselineSamples, telemetry: liveTelemetry, busy: loading || mutating,
 		onEvidence: recordRealInitialBaselineEvidence, onStartProcess: startRealInitialBaselineProcess,
 		onConfigureDemoTimeScale: configureRealInitialBaselineDemoTimeScale,
+		onConfigureDischargeSampling: configureRealInitialBaselineDischargeSampling,
 		onConfigureFloatStablePolicy: configureRealInitialBaselineFloatStablePolicy,
+		onStartControlledDischarge: startRealInitialBaselineControlledDischarge,
 		onCompleteProcess: completeRealInitialBaselineProcess, onContinue: continueRealInitialBaseline,
 		onExecuteAction: executeRealInitialBaselineAction, onRedoStage: redoRealInitialBaselineStage,
 		canRedoStage: canRedoInitialBaselineStage
@@ -167,7 +170,7 @@
 		}
 	}
 
-	function applyEvent(detail: CalibrationEventDetail, resetViewedStage = false) {
+	function applyEvent(detail: CalibrationEventDetail, resetViewedStage = false, syncReadback = true) {
 		event = detail;
 		selectedEventId = detail.calibrationEventId;
 		const existing = events.findIndex((item) => item.calibrationEventId === detail.calibrationEventId);
@@ -178,7 +181,7 @@
 		} else if (pendingDangerAction) {
 			pendingDangerAction = detail.allowedActions.find((action) => action.actionCode === pendingDangerAction?.actionCode) ?? null;
 		}
-		if (detail.eventType === 'INITIAL_BASELINE') void syncInitialBaselineReadback(detail);
+		if (syncReadback && detail.eventType === 'INITIAL_BASELINE') void syncInitialBaselineReadback(detail);
 	}
 
 	async function syncInitialBaselineReadback(detail: CalibrationEventDetail) {
@@ -502,10 +505,15 @@
 		mutating = true;
 		error = '';
 		try {
-			applyEvent(await appendCalibrationEvidence({ calibrationEventId: event.calibrationEventId,
+			const updated = await appendCalibrationEvidence({ calibrationEventId: event.calibrationEventId,
 				calibrationStageId: currentStage.calibrationStageId, expectedEventVersion: event.eventVersion,
 				evidenceType: type, status: 'PASS', ...(value !== undefined ? { numericValue: value, unit } : { textValue: 'Confirmed' }),
-				...(sampleId !== undefined ? { calibrationSampleId: sampleId } : {}) }));
+				...(sampleId !== undefined ? { calibrationSampleId: sampleId } : {}) });
+			applyEvent(updated, false, false);
+			// Keep the checkbox and dependent controls tied to persisted readback. In
+			// particular, the discharge panel appears only after TEST_LOAD_CONNECTED
+			// can be read from the append-only evidence history.
+			await syncInitialBaselineReadback(updated);
 		} catch (cause) { await recoverAfterMutationFailure(cause, previous); }
 		finally { mutating = false; }
 	}
@@ -522,6 +530,23 @@
 				calibrationStageId: currentStage.calibrationStageId,
 				expectedEventVersion: event.eventVersion,
 				demoTimeScaleFactor: factor
+			}));
+		} catch (cause) { await recoverAfterMutationFailure(cause, previous); }
+		finally { mutating = false; }
+	}
+
+	async function configureRealInitialBaselineDischargeSampling(minutes: number) {
+		if (!event || !currentStage || event.eventType !== 'INITIAL_BASELINE'
+			|| currentStage.type !== 'WAITING_FOR_LOAD' || mutating) return;
+		const previous = event;
+		mutating = true;
+		error = '';
+		try {
+			applyEvent(await configureCalibrationDischargeSampling({
+				calibrationEventId: event.calibrationEventId,
+				calibrationStageId: currentStage.calibrationStageId,
+				expectedEventVersion: event.eventVersion,
+				dischargeSamplingIntervalMinutes: minutes
 			}));
 		} catch (cause) { await recoverAfterMutationFailure(cause, previous); }
 		finally { mutating = false; }
@@ -564,6 +589,48 @@
 	}
 
 	function startRealInitialBaselineProcess(type: string) { void mutateRealInitialBaselineProcess(type, false); }
+
+	async function startRealInitialBaselineControlledDischarge() {
+		if (!event || !currentStage || event.eventType !== 'INITIAL_BASELINE' || mutating) return;
+		if (!['WAITING_FOR_LOAD', 'DISCHARGE'].includes(currentStage.type)) return;
+		const previous = event;
+		let accepted = event;
+		mutating = true;
+		error = '';
+		notice = '';
+		try {
+			if (currentStage.type === 'WAITING_FOR_LOAD') {
+				const complete = event.allowedActions.find((action) => action.actionCode === 'COMPLETE_STAGE');
+				if (!complete?.enabled) return;
+				accepted = await executeCalibrationStageAction(event.calibrationEventId,
+					currentStage.calibrationStageId, complete.actionCode, event.eventVersion);
+			}
+			const dischargeStage = accepted.stages.find((stage) => stage.calibrationStageId === accepted.currentStageId);
+			const process = accepted.processes.find((item) => item.type === 'CONTROLLED_DISCHARGE'
+				&& item.calibrationStageId === dischargeStage?.calibrationStageId);
+			if (dischargeStage?.type !== 'DISCHARGE' || process?.state !== 'NOT_STARTED') {
+				throw new Error('Backend did not expose a startable CONTROLLED_DISCHARGE process.');
+			}
+			const started = await startCalibrationProcess(accepted.calibrationEventId,
+				dischargeStage.calibrationStageId, process.calibrationProcessId, accepted.eventVersion);
+			// Do not render an intermediate lifecycle. Both versioned mutations have
+			// succeeded, so only the final authoritative response is applied.
+			applyEvent(started, true);
+			notice = `Controlled discharge started at event version ${started.eventVersion}.`;
+		} catch (cause) {
+			const failure = message(cause);
+			try {
+				applyEvent(await getCalibrationEvent(previous.calibrationEventId), true);
+			} catch {
+				// If stage completion succeeded but the follow-up call or reload failed,
+				// retain the newest response we actually received, never the stale input.
+				applyEvent(accepted, true);
+			}
+			error = failure;
+		} finally {
+			mutating = false;
+		}
+	}
 	function completeRealInitialBaselineProcess(type: string) { void mutateRealInitialBaselineProcess(type, true); }
 	function continueRealInitialBaseline() {
 		const action = event?.allowedActions.find((item) => item.actionCode === 'COMPLETE_STAGE');

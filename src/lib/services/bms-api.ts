@@ -1,4 +1,5 @@
 import { browser } from '$app/environment';
+import type { BmsNetworkUpdateParams } from '$lib/contracts/connectivity';
 import { bmsRestPath, bmsWebSocketUrl } from '$lib/services/backend-settings';
 
 type RpcResponse = { id:string; result?:Record<string,unknown>; error?:{message?:string} };
@@ -61,7 +62,13 @@ export async function updateBmsSerialPort(port:BmsSerialPort){const response=awa
 
 export type BmsNetwork={id:string;name:string;interfaceName:string;available:boolean;connected:boolean;status:string;error?:string|null;ipAddress:string|null;subnetMask:string|null;gateway:string|null;dns:string|null;mode:string|null};
 export async function listBmsNetworks(){const response=await bmsRpc<{networks?:BmsNetwork[]}>('bms.tools.network.list');return response.networks??[];}
-export function updateBmsNetwork(config:BmsNetwork){return bmsRpc<BmsNetwork>('bms.tools.network.update',{id:config.id,ipAddress:config.ipAddress??'',subnetMask:config.subnetMask??'',gateway:config.gateway??'',dns:config.dns??'',mode:config.mode??''});}
+export function updateBmsNetwork(config:BmsNetworkUpdateParams){return bmsRpc<BmsNetwork>('bms.tools.network.update',config);}
+
+export type BmsModemConfig={enabled:boolean;apn:string;username:string;passwordConfigured:boolean};
+export type BmsModemStatus={status:string;signalStrength:number;signalDbm?:number;operator:string;ipAddress:string;connectionType:string;modemModel:string;imei:string;lastError:string|null};
+export function getBmsModemStatus(){return bmsRpc<BmsModemStatus>('bms.tools.modem.status');}
+export function getBmsModemConfig(){return bmsRpc<BmsModemConfig>('bms.tools.modem.config');}
+export function updateBmsModemConfig(config:{apn:string;username:string;password:string}){return bmsRpc<{success:boolean}>('bms.tools.modem.update',config);}
 
 export type DischargeEventStatus='PENDING'|'RUNNING'|'STOPPED'|'SUCCESS'|'FAILED'|'CHARGE_DETECTED';
 export type DischargeEventType='BASELINE_CALIBRATION'|'SOH_CHECK';
@@ -105,6 +112,7 @@ export type CalibrationHistory={transitions:CalibrationTransition[];evidence:Cal
 export type CreateCalibrationEventInput={stringIndex:number;currentDirection:DischargeCurrentDirection}&({eventType:'MONTHLY_INSPECTION'}|{eventType:'INITIAL_BASELINE';dischargeMethod:'C10'|'C5';dischargeEndpointMode:'FULL_CUTOFF';chargeCurrentLimitA?:number});
 export type AppendCalibrationEvidenceInput={calibrationEventId:number;calibrationStageId:number;expectedEventVersion:number;evidenceType:string;status:'RECORDED'|'PASS'|'FAIL'|'MISSING_NOT_AVAILABLE'|'NOT_APPLICABLE'|'DATA_INVALID';numericValue?:number;textValue?:string;unit?:string;note?:string;calibrationSampleId?:number};
 export type ConfigureCalibrationDemoTimeScaleInput={calibrationEventId:number;calibrationStageId:number;expectedEventVersion:number;demoTimeScaleFactor:1|60};
+export type ConfigureCalibrationDischargeSamplingInput={calibrationEventId:number;calibrationStageId:number;expectedEventVersion:number;dischargeSamplingIntervalMinutes:number};
 export type ConfigureCalibrationFloatStablePolicyInput={calibrationEventId:number;calibrationStageId:number;expectedEventVersion:number;floatStableDurationMinutes:number;floatVoltageToleranceV:number;floatCurrentMinA:number;floatCurrentMaxA:number};
 export async function listCalibrationEvents(stringIndex?:number){const response=await bmsRpc<{events?:CalibrationEventSummary[]}>('bms.calibration.list',stringIndex===undefined?{}:{stringIndex});return response.events??[];}
 export function getCalibrationEvent(calibrationEventId:number){return bmsRpc<CalibrationEventDetail>('bms.calibration.get',{calibrationEventId});}
@@ -114,6 +122,7 @@ export function createCalibrationEvent(input:CreateCalibrationEventInput){return
 export function startCalibrationEvent(calibrationEventId:number,expectedEventVersion:number){return bmsRpc<CalibrationEventDetail>('bms.calibration.start',{calibrationEventId,expectedEventVersion});}
 export function appendCalibrationEvidence(input:AppendCalibrationEvidenceInput){return bmsRpc<CalibrationEventDetail>('bms.calibration.appendEvidence',input);}
 export function configureCalibrationDemoTimeScale(input:ConfigureCalibrationDemoTimeScaleInput){return bmsRpc<CalibrationEventDetail>('bms.calibration.configureDemoTimeScale',input);}
+export function configureCalibrationDischargeSampling(input:ConfigureCalibrationDischargeSamplingInput){return bmsRpc<CalibrationEventDetail>('bms.calibration.configureDischargeSampling',input);}
 export function configureCalibrationFloatStablePolicy(input:ConfigureCalibrationFloatStablePolicyInput){return bmsRpc<CalibrationEventDetail>('bms.calibration.configureFloatStablePolicy',input);}
 export function executeCalibrationStageAction(calibrationEventId:number,calibrationStageId:number,actionCode:CalibrationActionCode,expectedEventVersion:number,reason?:string,acknowledgedEvidence:string[]=[]){return bmsRpc<CalibrationEventDetail>('bms.calibration.executeStageAction',{calibrationEventId,calibrationStageId,actionCode,expectedEventVersion,...(reason?.trim()?{reason:reason.trim()}:{}),acknowledgedEvidence});}
 export function redoCalibrationStage(calibrationEventId:number,calibrationStageId:number,expectedEventVersion:number,reason:string){return bmsRpc<CalibrationEventDetail>('bms.calibration.redoStage',{calibrationEventId,calibrationStageId,expectedEventVersion,reason:reason.trim()});}

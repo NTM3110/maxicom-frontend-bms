@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { AlertTriangle, ArrowLeft, CheckCircle2, ClipboardCheck, Play } from '@lucide/svelte';
-	import type { BatteryString, CalibrationAllowedAction, CalibrationProcess } from '$lib/services/bms-api';
+	import type { BatteryString, CalibrationAllowedAction, CalibrationProcess, CalibrationStage } from '$lib/services/bms-api';
 	import type { InitialBaselineDemoCellResistance, InitialBaselineDemoTicket } from './initial-baseline-demo';
 	import DischargeTrendChart from './DischargeTrendChart.svelte';
 	import InitialBaselineStageFive from './InitialBaselineStageFive.svelte';
@@ -50,7 +50,8 @@
 	let floatCurrentMaxInput = $state((ticket.floatCurrentMaxA ?? 0.2).toFixed(1));
 	let floatPolicyInputEventVersion = $state<number | null>(null);
 	let dischargeProfile = $state<'0.1C10' | '0.2C5'>('0.1C10');
-	let dischargeSamplingMinutes = $state('30');
+	let dischargeSamplingMinutes = $state('10');
+	let dischargeSamplingLastConfiguredMinutes = $state<number | null>(null);
 	let dischargeLoadConnected = $state(false);
 	let dischargeScheduled = $state(false);
 	let dischargeStartedAt = $state<number | null>(null);
@@ -77,8 +78,53 @@
 	let midpointVoltage = $state(ticket.midpointVoltage || (floatVoltage / 2).toFixed(1));
 	let rippleNoLoad = $state(ticket.rippleNoLoad ?? '0.6');
 	let rippleWithLoad = $state(ticket.rippleWithLoad ?? '0.8');
-	let dischargeCurrent = $derived((batteryString?.ratedCapacity ?? 200) * (dischargeProfile === '0.2C5' ? 0.2 : 0.1));
-	let dischargeCutoff = $derived(dischargeProfile === '0.2C5' ? 1.75 : 1.8);
+	let dischargeCurrent = $derived(configurationNumber('ratedCapacityAh', batteryString?.ratedCapacity ?? 200)
+		* (real?.event.configuration.dischargeMethod === 'C5' || !real && dischargeProfile === '0.2C5' ? 0.2 : 0.1));
+	let dischargeCutoff = $derived(configurationNumber('cutoffVoltagePerCell', dischargeProfile === '0.2C5' ? 1.75 : 1.8));
+	let realCurrentStage = $derived(real?.event.stages.find((stage) => stage.calibrationStageId === real.event.currentStageId) ?? null);
+	let displayedDischargeStage = $derived(real ? dischargeStageForView(realCurrentStage, real.event.stages) : null);
+	let displayedDischargePhase = $derived(displayedDischargeStage?.type ?? null);
+	let dischargeStageIsAuthoritativeCurrent = $derived(Boolean(real && displayedDischargeStage
+		&& displayedDischargeStage.calibrationStageId === real.event.currentStageId));
+	let controlledDischargeProcess = $derived(real ? initialBaselineProcess(real, 'CONTROLLED_DISCHARGE') : null);
+	let configuredDischargeSamplingMinutes = $derived(dischargeProcessPropertyNumber('dischargeSamplingIntervalMinutes', 10));
+	let dischargeSamplingDirty = $derived(Boolean(real) && Number(dischargeSamplingMinutes) !== configuredDischargeSamplingMinutes);
+	let dischargeSamplingValid = $derived(Number.isInteger(Number(dischargeSamplingMinutes))
+		&& Number(dischargeSamplingMinutes) >= 1 && Number(dischargeSamplingMinutes) <= 1440);
+	let waitingForLoadCompleteAction = $derived(real?.event.allowedActions.find((action) => action.actionCode === 'COMPLETE_STAGE') ?? null);
+	let dischargeRevalidateAction = $derived(real?.event.allowedActions.find((action) => action.actionCode === 'REVALIDATE_STAGE') ?? null);
+	let dischargeRevalidationRequired = $derived(Boolean(real && dischargeStageIsAuthoritativeCurrent
+		&& (real.event.status === 'REVALIDATION_REQUIRED' || realCurrentStage?.state === 'REVALIDATION_REQUIRED')));
+	let startControlledDischargeDisabledReason = $derived(controlledDischargeStartDisabledReason());
+	let canStartControlledDischarge = $derived(startControlledDischargeDisabledReason === null);
+	let effectiveDischargeSamplingSeconds = $derived(Math.max(1, Math.ceil(configuredDischargeSamplingMinutes * 60 / (real ? prerequisiteDemoTimeScaleFactor() : 1))));
+	let realDischargeSamples = $derived(real && controlledDischargeProcess ? real.samples
+		.filter((sample) => sample.calibrationProcessId === controlledDischargeProcess?.calibrationProcessId
+			&& sample.processAttemptNumber === controlledDischargeProcess?.attemptNumber)
+		.sort((left, right) => left.sampleId - right.sampleId) : []);
+	let latestDischargeSample = $derived(realDischargeSamples.at(-1) ?? null);
+	// Live telemetry is a readiness preview only. Once the persisted process has
+	// started, every official discharge metric and chart point must come from the
+	// event/process/attempt-linked calibration samples below.
+	let showLiveDischargePreview = $derived(Boolean(real && controlledDischargeProcess?.state === 'NOT_STARTED'
+		&& latestDischargeSample === null));
+	let liveDischargeStringVoltage = $derived(showLiveDischargePreview ? finiteNumber(real?.telemetry?.summary.stringVoltage) : null);
+	let liveDischargeCurrent = $derived(showLiveDischargePreview ? finiteNumber(real?.telemetry?.summary.stringCurrent) : null);
+	let liveDischargeLowestCellVoltage = $derived(showLiveDischargePreview ? lowestLiveCellVoltage() : null);
+	let displayedDischargeStringVoltage = $derived(latestDischargeSample?.stringVoltageV ?? liveDischargeStringVoltage);
+	let displayedDischargeCurrent = $derived(latestDischargeSample?.domainCurrentA ?? liveDischargeCurrent);
+	let displayedDischargeLowestCellVoltage = $derived(latestDischargeSample ? lowestPersistedCellVoltage() : liveDischargeLowestCellVoltage);
+	let cutoffDischargeSample = $derived(realDischargeSamples.filter((sample) => sample.persistenceReason === 'CUTOFF'
+		&& sample.quality === 'VALID').at(-1) ?? null);
+	let realDischargeTrend = $derived(realDischargeSamples.map((sample) => ({
+		label: sample.measurementTime ? new Date(sample.measurementTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : `#${sample.snapshotSequence}`,
+		voltageV: sample.averageVoltageV ?? (sample.cells.length ? sample.cells.reduce((sum, cell) => sum + (cell.voltageV ?? 0), 0) / sample.cells.length : 0),
+		usedAh: sample.rawUsedAh ?? 0
+	})));
+	let dischargeRecommendation = $derived(typeof controlledDischargeProcess?.properties?.recommendation === 'string'
+		? controlledDischargeProcess.properties.recommendation : null);
+	let dischargeBlockers = $derived(Array.isArray(controlledDischargeProcess?.properties?.blockers)
+		? controlledDischargeProcess.properties.blockers.filter((value): value is string => typeof value === 'string') : []);
 	let dischargeProgress = $derived(real ? initialBaselineProcess(real, 'CONTROLLED_DISCHARGE')?.state === 'COMPLETED' ? 100 : initialBaselineProcess(real, 'CONTROLLED_DISCHARGE')?.state === 'ACTIVE' ? 50 : 0 : dischargeStartedAt == null ? 0 : Math.min(100, Math.floor((now - dischargeStartedAt) / 120)));
 	let dischargeComplete = $derived(dischargeProgress >= 100);
 	let demoDischargedCapacity = $derived(((batteryString?.ratedCapacity ?? 200) * .984 * dischargeProgress / 100).toFixed(1));
@@ -261,7 +307,7 @@
 			const evidence = ([
 				['BATTERY_CHARGER_CONNECTIONS_CHECKED', 'LOAD_MCB_OPEN_CONFIRMED', 'SAFETY_VISUAL_INSPECTION_CONFIRMED', 'OPEN_CIRCUIT_VOLTAGE_REVIEWED'],
 				[], ['CHARGER_MCB_OPEN_FOR_COOLDOWN', 'AMBIENT_TEMPERATURE_REVIEWED', 'COOLDOWN_SAFETY_VALVES_REVIEWED'],
-				['DISCHARGE_PROFILE_REVIEWED', 'TEST_LOAD_CONNECTED', 'DISCHARGE_CUTOFF_REVIEWED'], [],
+				['TEST_LOAD_CONNECTED', 'DISCHARGE_CUTOFF_REVIEWED'], [],
 				['BASELINE_SUMMARY_REVIEWED']
 			] as const)[selectedIndex]?.[index];
 			if (checked && evidence) real.onEvidence(evidence);
@@ -312,6 +358,46 @@
 		return blockers.length || recommendation ? { blockers, recommendation } : null;
 	}
 
+	function finiteNumber(value: number | null | undefined) {
+		return typeof value === 'number' && Number.isFinite(value) ? value : null;
+	}
+
+	function lowestLiveCellVoltage() {
+		if (!real) return null;
+		const summaryMinimum = finiteNumber(real.telemetry?.summary.minVoltage);
+		if (summaryMinimum !== null) return summaryMinimum;
+		const values = real.telemetry?.cells.map((cell) => finiteNumber(cell.voltage))
+			.filter((value): value is number => value !== null) ?? [];
+		return values.length ? Math.min(...values) : null;
+	}
+
+	function lowestPersistedCellVoltage() {
+		const values = latestDischargeSample?.cells.map((cell) => finiteNumber(cell.voltageV))
+			.filter((value): value is number => value !== null) ?? [];
+		return values.length ? Math.min(...values) : null;
+	}
+
+	function controlledDischargeStartDisabledReason() {
+		if (!real) return 'A real calibration event is required.';
+		if (real.busy) return 'Wait for the current backend request to finish.';
+		if (!dischargeLoadConnected) return 'Confirm the standard load connection and wait for persisted evidence readback.';
+		if (!dischargeSamplingValid) return 'Enter a whole sampling interval from 1 to 1440 calibration minutes.';
+		if (dischargeSamplingDirty) return 'Save the changed sampling interval before starting discharge.';
+		if (!controlledDischargeProcess) return 'Backend did not create CONTROLLED_DISCHARGE for this event.';
+		if (controlledDischargeProcess.state !== 'NOT_STARTED') return `CONTROLLED_DISCHARGE is ${controlledDischargeProcess.state}.`;
+		if (!dischargeStageIsAuthoritativeCurrent) return 'Return to the active discharge stage before starting the process.';
+		if (dischargeRevalidationRequired) {
+			return 'OpenEMS restarted while this physical stage was active. Revalidate the charger, load and battery topology before starting discharge.';
+		}
+		if (displayedDischargePhase === 'DISCHARGE') return null;
+		if (displayedDischargePhase !== 'WAITING_FOR_LOAD') return 'The active backend stage is not ready to start discharge.';
+		if (!waitingForLoadCompleteAction) return 'Backend did not return COMPLETE_STAGE for WAITING_FOR_LOAD.';
+		if (!waitingForLoadCompleteAction.enabled) {
+			return waitingForLoadCompleteAction.disabledReason ?? 'Backend has disabled completion of WAITING_FOR_LOAD.';
+		}
+		return null;
+	}
+
 	function processBlockerMessage(blocker: string) {
 		switch (blocker) {
 			case 'PHASE_CURRENT_INCONSISTENT':
@@ -335,6 +421,25 @@
 		if (!real) return null;
 		const value = initialFloatProcess?.properties?.[key];
 		return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+	}
+
+	function dischargeProcessPropertyNumber(key: string, fallback: number) {
+		const value = controlledDischargeProcess?.properties?.[key];
+		return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+	}
+
+	function dischargeStageForView(currentStage: CalibrationStage | null, stages: CalibrationStage[]) {
+		const stageTypes = new Set(['WAITING_FOR_LOAD', 'DISCHARGE', 'LOAD_DISCONNECT']);
+		if (currentStage && stageTypes.has(currentStage.type)) return currentStage;
+
+		// Stage 4 is one logical UI step backed by three persisted stages. When an
+		// operator reviews it after the workflow has advanced, retain the latest
+		// reached sub-stage instead of branching on the event's unrelated current
+		// stage and rendering an empty panel.
+		return stages.filter((stage) => stageTypes.has(stage.type) && stage.state !== 'NOT_STARTED')
+			.sort((left, right) => right.order - left.order)[0]
+			?? stages.find((stage) => stage.type === 'WAITING_FOR_LOAD')
+			?? null;
 	}
 
 	function processTemperature(type: 'BOOST_CHARGE_TO_VBOOST' | 'FLOAT_SETTLEMENT_TO_VFLOAT') {
@@ -568,8 +673,12 @@
 	}
 
 	function confirmDischargeResult(checked: boolean) {
-		if (real) { if (checked) real.onEvidence('DISCHARGE_CUTOFF_REVIEWED'); return; }
+		if (real) { if (checked && cutoffDischargeSample) real.onEvidence('DISCHARGE_CUTOFF_REVIEWED', undefined, undefined, cutoffDischargeSample.sampleId); return; }
 		dischargeResultRecorded = checked;
+	}
+
+	function confirmDischargeLoadDisconnected(checked: boolean) {
+		if (real) { if (checked) real.onEvidence('TEST_LOAD_DISCONNECTED'); return; }
 	}
 
 	function confirmSummary(checked: boolean) {
@@ -603,13 +712,26 @@
 	}
 
 	function scheduleDischarge() {
-		if (real) { real.onEvidence('DISCHARGE_PROFILE_REVIEWED'); return; }
 		if (!dischargeLoadConnected) return;
 		dischargeScheduled = true;
 		dischargeStartedAt = Date.now();
 		dischargeResultRecorded = false;
 		dischargedCapacity = ((batteryString?.ratedCapacity ?? 200) * .984).toFixed(1);
 		lowestCellVoltage = dischargeCutoff.toFixed(2);
+	}
+
+	function saveDischargeSampling() {
+		const minutes = Number(dischargeSamplingMinutes);
+		if (!real || !Number.isInteger(minutes) || minutes < 1 || minutes > 1440) return;
+		real.onConfigureDischargeSampling(minutes);
+	}
+
+	function startControlledDischarge() {
+		real?.onStartControlledDischarge();
+	}
+
+	function completeControlledDischarge() {
+		real?.onCompleteProcess('CONTROLLED_DISCHARGE');
 	}
 
 	function startRecoveryCharge() {
@@ -662,6 +784,14 @@
 		dischargeLoadConnected = hasInitialBaselineEvidence(real, 'TEST_LOAD_CONNECTED');
 		dischargeScheduled = initialBaselineProcess(real, 'CONTROLLED_DISCHARGE')?.state !== 'NOT_STARTED';
 		dischargeResultRecorded = hasInitialBaselineEvidence(real, 'DISCHARGE_CUTOFF_REVIEWED');
+		// Preserve an operator edit across unrelated authoritative readbacks (for
+		// example TEST_LOAD_CONNECTED). Only adopt a backend value when this is the
+		// first readback or the input still equals the previously configured value.
+		if (dischargeSamplingLastConfiguredMinutes === null
+				|| Number(dischargeSamplingMinutes) === dischargeSamplingLastConfiguredMinutes) {
+			dischargeSamplingMinutes = configuredDischargeSamplingMinutes.toString();
+		}
+		dischargeSamplingLastConfiguredMinutes = configuredDischargeSamplingMinutes;
 		summaryApproved = hasInitialBaselineEvidence(real, 'BASELINE_SUMMARY_REVIEWED');
 		floatCurrent = realFloatSample?.domainCurrentA == null ? '—' : (Math.abs(realFloatSample.domainCurrentA) * 1000).toFixed(1);
 		midpointVoltage = realFloatSample?.midpointVoltageV?.toFixed(3) ?? '—';
@@ -783,13 +913,44 @@
 			</section>
 		{:else if selectedIndex === 3}
 			<section class="discharge-workflow">
-				<div class="discharge-controls"><label>Discharge profile<select bind:value={dischargeProfile} disabled={dischargeScheduled}><option value="0.1C10">0.1C10 — 10 h</option><option value="0.2C5">0.2C5 — 5 h</option></select></label><label>Test current (A)<input value={dischargeCurrent.toFixed(1)} readonly /></label><label>Cut-off / cell (VDC)<input value={dischargeCutoff.toFixed(2)} readonly /></label><label>Sampling interval (min)<input type="number" min="1" bind:value={dischargeSamplingMinutes} disabled={dischargeScheduled} /></label></div>
+				<div class="discharge-controls"><label>Discharge profile<select bind:value={dischargeProfile} disabled={Boolean(real) || dischargeScheduled}>{#if real}<option value={real.event.configuration.dischargeMethod === 'C5' ? '0.2C5' : '0.1C10'}>{real.event.configuration.dischargeMethod === 'C5' ? '0.2C5 — 5 h' : '0.1C10 — 10 h'}</option>{:else}<option value="0.1C10">0.1C10 — 10 h</option><option value="0.2C5">0.2C5 — 5 h</option>{/if}</select></label><label>Test current (A)<input value={dischargeCurrent.toFixed(1)} readonly /></label><label>Cut-off / cell (VDC)<input value={dischargeCutoff.toFixed(2)} readonly /></label><label>Sampling interval (calibration min)<input type="number" min="1" max="1440" step="1" bind:value={dischargeSamplingMinutes} disabled={real ? displayedDischargePhase !== 'WAITING_FOR_LOAD' || !dischargeStageIsAuthoritativeCurrent || real.busy : dischargeScheduled} /><small>{real ? `${effectiveDischargeSamplingSeconds} wall-clock seconds at ${realDemoTimeScaleFactor}×` : 'Demo ticket setting'}</small></label></div>
 				<div class="safety-banner"><AlertTriangle size={18} /><div><strong>Stop condition</strong><span>Stop at the first cell reaching {dischargeCutoff.toFixed(2)} V/cell, or sooner if a safety alarm occurs.</span></div></div>
+					{#if real}
+						{#if displayedDischargePhase === 'WAITING_FOR_LOAD'}
+							<p class="duration-note"><b>Physical preparation:</b> keep the default sampling interval or save a changed value, then connect the approved test load. Start advances the persisted WAITING_FOR_LOAD stage and starts CONTROLLED_DISCHARGE as two versioned backend mutations.</p>
+							<button class="secondary schedule-discharge" disabled={real.busy || !dischargeSamplingDirty || !dischargeSamplingValid} onclick={saveDischargeSampling}>Save sampling interval</button>
+						{#if dischargeSamplingDirty}<p class="settings-error">Save the changed sampling interval before starting discharge.</p>{/if}
+						<label class="charge-confirm"><input type="checkbox" checked={dischargeLoadConnected} onchange={(event) => confirmDischargeLoad(event.currentTarget.checked)} disabled={real.busy || !dischargeStageIsAuthoritativeCurrent} /><span><strong>Confirm standard load is connected</strong><small>Connect the approved test load before continuing to the discharge stage.</small></span></label>
+					{/if}
+					{#if dischargeLoadConnected || displayedDischargePhase === 'DISCHARGE' || displayedDischargePhase === 'LOAD_DISCONNECT'}
+						<section class="selected-discharge"><header><div><span>Controlled discharge</span><strong>{controlledDischargeProcess?.state ?? 'NOT_STARTED'}{dischargeRecommendation ? ` · ${dischargeRecommendation}` : ''}</strong></div><b>{displayedDischargeCurrent?.toFixed(3) ?? '—'} A · {latestDischargeSample?.rawUsedAh?.toFixed(2) ?? '—'} Ah</b></header>
+							{#if showLiveDischargePreview}<p class="discharge-source-note"><b>Live pre-start preview.</b> These values come from the current BMS snapshot and are not calibration samples. After Start, this panel switches entirely to persisted discharge samples.</p>{/if}
+							<div class="live-charge-metrics"><div><span>{showLiveDischargePreview ? 'Live string voltage' : 'Persisted string voltage'}</span><strong>{displayedDischargeStringVoltage?.toFixed(3) ?? '—'} V</strong></div><div><span>{showLiveDischargePreview ? 'Live lowest cell voltage' : 'Persisted lowest cell voltage'}</span><strong>{displayedDischargeLowestCellVoltage?.toFixed(3) ?? '—'} V</strong></div><div><span>Depth of discharge</span><strong>{latestDischargeSample?.dodPct?.toFixed(2) ?? '—'}%</strong></div></div>
+							<DischargeTrendChart cutoffPerCell={dischargeCutoff} values={realDischargeTrend} />
+							{#if !latestDischargeSample}<p class="duration-note"><b>Waiting for persisted discharge data.</b> The chart and official discharge metrics appear after the process starts and the configured sampling interval elapses.</p>{/if}
+						</section>
+						{#if dischargeBlockers.length}<div class="process-runtime-warning"><AlertTriangle size={17} /><div><strong>Backend process blockers</strong>{#each dischargeBlockers as blocker}<span><b>{blocker}</b> — {processBlockerMessage(blocker)}</span>{/each}</div></div>{/if}
+						{#if !controlledDischargeProcess}<div class="process-runtime-warning"><AlertTriangle size={17} /><div><strong>Controlled discharge process is unavailable</strong><span>Reload the event and verify that the backend created CONTROLLED_DISCHARGE for this workflow.</span></div></div>{/if}
+						{#if (displayedDischargePhase === 'WAITING_FOR_LOAD' || displayedDischargePhase === 'DISCHARGE') && controlledDischargeProcess?.state === 'NOT_STARTED'}
+							<button class="secondary schedule-discharge" disabled={!canStartControlledDischarge} title={startControlledDischargeDisabledReason ?? undefined} onclick={startControlledDischarge}><Play size={15} />Start discharge process</button>
+							{#if startControlledDischargeDisabledReason}<p class="start-disabled-reason"><AlertTriangle size={15} /><span><b>Start is blocked:</b> {startControlledDischargeDisabledReason}</span></p>{/if}
+							{#if dischargeRevalidationRequired && dischargeRevalidateAction?.enabled}
+								<div class="stage-revalidation-action"><div><strong>Physical-stage revalidation required</strong><span>OpenEMS restarted during this stage. Confirm the physical topology before discharge can start.</span></div><button class="secondary warning-text" disabled={real.busy} onclick={() => requestFooterAction(dischargeRevalidateAction)}>Revalidate physical stage</button></div>
+							{/if}
+						{/if}
+						{#if controlledDischargeProcess?.state === 'ACTIVE' && dischargeRecommendation === 'READY_TO_COMPLETE'}<button class="secondary schedule-discharge" disabled={real.busy || !cutoffDischargeSample} onclick={completeControlledDischarge}>Complete discharge process</button>{/if}
+						{#if controlledDischargeProcess?.state === 'COMPLETED'}<label class="charge-confirm"><input type="checkbox" checked={dischargeResultRecorded} disabled={real.busy || !cutoffDischargeSample} onchange={(event) => confirmDischargeResult(event.currentTarget.checked)} /><span><strong>Confirm persisted discharge result</strong><small>{cutoffDischargeSample ? `Cut-off sample #${cutoffDischargeSample.sampleId}, ${(cutoffDischargeSample.rawUsedAh ?? 0).toFixed(2)} Ah.` : 'Waiting for a valid persisted cut-off sample.'}</small></span></label>{/if}
+						{#if displayedDischargePhase === 'LOAD_DISCONNECT'}
+							<label class="charge-confirm"><input type="checkbox" checked={hasInitialBaselineEvidence(real, 'TEST_LOAD_DISCONNECTED')} disabled={real.busy} onchange={(event) => confirmDischargeLoadDisconnected(event.currentTarget.checked)} /><span><strong>Confirm test load is disconnected</strong><small>Physically isolate the test load before recovery charging.</small></span></label>
+						{/if}
+					{/if}
+				{:else}
 				<label class="charge-confirm"><input type="checkbox" checked={dischargeLoadConnected} onchange={(event) => confirmDischargeLoad(event.currentTarget.checked)} disabled={dischargeScheduled} /><span><strong>Confirm standard load is connected</strong><small>Connect the approved test load before scheduling the discharge event.</small></span></label>
 				{#if !dischargeScheduled}<button class="secondary schedule-discharge" disabled={!dischargeLoadConnected || !Number(dischargeSamplingMinutes)} onclick={scheduleDischarge}><Play size={15} />Schedule discharge event</button>{:else}
 					<section class="selected-discharge"><header><div><span>Selected discharge event</span><strong>{dischargeComplete ? 'Cut-off reached / demo' : 'Running / demo'}</strong></div><b>{dischargeCurrent.toFixed(1)} A · {demoDischargedCapacity} Ah</b></header><DischargeTrendChart demo={true} cutoffPerCell={dischargeCutoff} progress={dischargeProgress} />{#if !dischargeComplete}<div class="discharge-running"><i></i><span>Discharging {formatDemoDuration(Math.min(12, Math.floor(dischargeProgress * .12)))} / 00:12 demo</span><b>{demoDischargedCapacity} Ah used</b></div>{/if}</section>
 					{#if dischargeComplete}<div class="discharge-results"><label>Discharged capacity (Ah)<input type="number" min="0" bind:value={dischargedCapacity} /></label><label>Lowest cell voltage (VDC)<input type="number" step="0.01" bind:value={lowestCellVoltage} /></label><label>Stop reason<select bind:value={dischargeStopReason}><option value="CELL_CUTOFF">Cell reached configured cut-off</option><option value="OPERATOR_STOP">Operator stopped test</option><option value="SAFETY_ALARM">Safety alarm</option></select></label></div>
 					<label class="charge-confirm"><input type="checkbox" checked={dischargeResultRecorded} onchange={(event) => confirmDischargeResult(event.currentTarget.checked)} /><span><strong>Confirm discharge result</strong><small>Capacity, lowest cell voltage and stop reason have been recorded.</small></span></label>{/if}
+				{/if}
 				{/if}
 			</section>
 			{:else if selectedIndex === 4}
@@ -824,7 +985,8 @@
 	.progressive-checklist{grid-column:1/-1}.progressive-checklist>p{margin:-3px 0 12px;color:#7b899d;font-size:11px}.progressive-checklist li{display:flex;align-items:flex-start;gap:9px;padding:10px 0;border-top:1px solid #e7edf4}.progressive-checklist .item-number{display:grid;width:20px;height:20px;flex:none;place-items:center;border-radius:50%;color:#5875a3;background:#eaf1fb;font-size:10px;font-weight:600}.progressive-checklist li.complete .item-number{color:#fff;background:#4f8a6a}.progressive-checklist li label{flex:1}
 	.float-progress{background:#dceee3}.float-progress i{background:#4f8a6a}.cooldown-progress{background:#dceee3}.cooldown-progress i{background:#4f8a6a}
 	.float-settings{overflow:hidden;border-radius:11px;background:#f6f8fb}.float-settings header{display:flex;justify-content:space-between;gap:12px;padding:13px 14px;border-bottom:1px solid #e6edf5}.float-settings header div{display:grid;gap:3px}.float-settings header span,.float-settings header small{color:#718096;font-size:11px}.float-settings header strong{color:#40516d;font-size:13px;font-weight:500}.float-settings-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;padding:14px}.float-settings-grid label{display:grid;gap:5px;color:#718096;font-size:11px}.float-settings-grid label>div{display:flex;align-items:center;gap:6px}.float-settings-grid input{min-width:0;width:100%;min-height:37px;padding:0 9px;border:1px solid #dce4ef;border-radius:7px;color:#34465f;background:#fff;font:inherit}.settings-error{margin:0;padding:0 14px 12px;color:#a13a32;font-size:11px}.float-stable{display:grid;gap:10px;padding:16px;border-radius:11px;background:#f0f5fd}.float-stable.ready{background:#edf9f1}.float-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}.float-metrics>div{display:grid;gap:4px;padding:10px;border-radius:8px;background:rgba(255,255,255,.72)}.float-metrics span,.float-metrics small{color:#718096;font-size:10px}.float-metrics strong{color:#30415d;font-size:14px;font-weight:500}@media(max-width:650px){.float-settings-grid,.float-metrics{grid-template-columns:1fr}}
-	.discharge-workflow{display:grid;gap:11px}.discharge-controls,.discharge-results{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.discharge-results{grid-template-columns:repeat(3,1fr)}.discharge-controls label,.discharge-results label{display:grid;gap:5px;color:#718096;font-size:11px}.discharge-controls input,.discharge-controls select,.discharge-results input,.discharge-results select{width:100%;min-height:38px;padding:0 10px;border:1px solid #dce4ef;border-radius:7px;color:#34465f;background:#fbfcfe;font:inherit;font-size:13px}.discharge-controls input[readonly]{color:#566983;background:#f3f6fa}.safety-banner{display:flex;align-items:flex-start;gap:9px;padding:12px 14px;border-radius:9px;color:#9d473c;background:#fff5f3}.safety-banner svg{flex:none;margin-top:1px}.safety-banner div{display:grid;gap:3px}.safety-banner strong{font-size:13px;font-weight:500}.safety-banner span{font-size:11px;line-height:1.4}.schedule-discharge{justify-self:start;min-height:35px;font-size:12px}.selected-discharge{overflow:hidden;border-radius:9px;background:#f7f9fc}.selected-discharge>header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px}.selected-discharge>header div{display:grid;gap:3px}.selected-discharge>header span{color:#718096;font-size:11px}.selected-discharge>header strong{color:#28734b;font-size:13px;font-weight:500}.selected-discharge>header b{color:#405a7e;font-size:12px;font-weight:500}.discharge-running{display:flex;align-items:center;gap:8px;padding:11px 14px;border-top:1px solid #e7edf4;color:#607695;font-size:11px}.discharge-running i{width:8px;height:8px;border-radius:50%;background:#4778ce;animation:pulse 1.1s ease-in-out infinite}.discharge-running b{margin-left:auto;color:#3e639e;font-size:12px;font-weight:500}@media(max-width:800px){.discharge-controls{grid-template-columns:1fr 1fr}.discharge-results{grid-template-columns:1fr}}@media(max-width:650px){.discharge-controls{grid-template-columns:1fr}.selected-discharge>header{align-items:flex-start;flex-direction:column}}
+	.discharge-workflow{display:grid;gap:11px}.discharge-controls,.discharge-results{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.discharge-results{grid-template-columns:repeat(3,1fr)}.discharge-controls label,.discharge-results label{display:grid;gap:5px;color:#718096;font-size:11px}.discharge-controls input,.discharge-controls select,.discharge-results input,.discharge-results select{width:100%;min-height:38px;padding:0 10px;border:1px solid #dce4ef;border-radius:7px;color:#34465f;background:#fbfcfe;font:inherit;font-size:13px}.discharge-controls input[readonly]{color:#566983;background:#f3f6fa}.safety-banner{display:flex;align-items:flex-start;gap:9px;padding:12px 14px;border-radius:9px;color:#9d473c;background:#fff5f3}.safety-banner svg{flex:none;margin-top:1px}.safety-banner div{display:grid;gap:3px}.safety-banner strong{font-size:13px;font-weight:500}.safety-banner span{font-size:11px;line-height:1.4}.schedule-discharge{justify-self:start;min-height:35px;font-size:12px}.selected-discharge{overflow:hidden;border-radius:9px;background:#f7f9fc}.selected-discharge>header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px}.selected-discharge>header div{display:grid;gap:3px}.selected-discharge>header span{color:#718096;font-size:11px}.selected-discharge>header strong{color:#28734b;font-size:13px;font-weight:500}.selected-discharge>header b{color:#405a7e;font-size:12px;font-weight:500}.discharge-source-note{margin:0;padding:10px 14px;border-top:1px solid #e7edf4;color:#526c91;background:#edf4ff;font-size:11px;line-height:1.45}.start-disabled-reason{display:flex;align-items:flex-start;gap:7px;margin:0;color:#92531d;font-size:11px;line-height:1.4}.start-disabled-reason :global(svg){flex:none;margin-top:1px}.discharge-running{display:flex;align-items:center;gap:8px;padding:11px 14px;border-top:1px solid #e7edf4;color:#607695;font-size:11px}.discharge-running i{width:8px;height:8px;border-radius:50%;background:#4778ce;animation:pulse 1.1s ease-in-out infinite}.discharge-running b{margin-left:auto;color:#3e639e;font-size:12px;font-weight:500}@media(max-width:800px){.discharge-controls{grid-template-columns:1fr 1fr}.discharge-results{grid-template-columns:1fr}}@media(max-width:650px){.discharge-controls{grid-template-columns:1fr}.selected-discharge>header{align-items:flex-start;flex-direction:column}}
+	.stage-revalidation-action{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px 14px;border:1px solid #ecd9ad;border-radius:9px;color:#7d5726;background:#fff8e9}.stage-revalidation-action>div{display:grid;gap:3px}.stage-revalidation-action strong{font-size:12px;font-weight:600}.stage-revalidation-action span{font-size:11px;line-height:1.4}.stage-revalidation-action button{flex:none}@media(max-width:650px){.stage-revalidation-action{align-items:stretch;flex-direction:column}.stage-revalidation-action button{align-self:flex-start}}
 	.recovery-workflow{display:grid;gap:11px}.baseline-measurements{overflow:hidden;border-radius:9px;background:#f5f8fc}.baseline-measurements header{display:flex;align-items:start;justify-content:space-between;gap:12px;padding:13px 14px;border-bottom:1px solid #e6edf5}.baseline-measurements header div{display:grid;gap:3px}.baseline-measurements header span{color:#718096;font-size:11px}.baseline-measurements header strong{color:#40516d;font-size:13px;font-weight:500}.baseline-measurements header small{padding:4px 7px;border-radius:99px;color:#396b50;background:#e6f5eb;font-size:10px}.baseline-measurement-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;padding:13px 14px}.baseline-measurement-grid label{display:grid;grid-template-columns:1fr 17px;gap:5px 8px;align-items:center;color:#5f6f86;font-size:11px}.baseline-measurement-grid label>span{grid-column:1/-1}.baseline-measurement-grid label input[type=number],.loaded-ripple>input{width:100%;min-height:37px;padding:0 9px;border:1px solid #dce4ef;border-radius:7px;color:#34465f;background:#fff;font:inherit;font-size:13px}.baseline-measurement-grid label input[type=checkbox]{width:16px;height:16px;accent-color:#1749ad}.baseline-measurement-grid label small{grid-column:1/-1;color:#8793a5;font-size:10px}.loaded-ripple{display:grid;grid-template-columns:1fr 115px auto;align-items:end;gap:10px;padding:13px 14px;border-radius:9px;background:#f5f8fc;color:#5f6f86;font-size:11px}.loaded-ripple>span{align-self:center}.loaded-ripple label{display:flex;align-items:center;gap:6px;min-height:37px;white-space:nowrap;font-size:11px}.loaded-ripple label input{width:16px;height:16px;accent-color:#1749ad}@media(max-width:800px){.baseline-measurement-grid{grid-template-columns:1fr}.loaded-ripple{grid-template-columns:1fr 120px}}@media(max-width:650px){.loaded-ripple{grid-template-columns:1fr}}
 	.summary-workflow{display:grid;gap:12px}.summary-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 14px;border-radius:9px;color:#315b9f;background:#f0f5fd}.summary-heading div{display:grid;gap:4px}.summary-heading div span{font-size:10px;font-weight:600;letter-spacing:.07em}.summary-heading strong{font-size:13px;font-weight:500}.summary-heading>span{padding:5px 8px;border-radius:99px;color:#28734b;background:#e5f5eb;font-size:10px;font-weight:500}.summary-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}.summary-grid article{display:grid;gap:4px;padding:12px;border-radius:8px;background:#f7f9fc}.summary-grid span,.summary-grid small{color:#7b899d;font-size:10px}.summary-grid strong{color:#34465f;font-size:15px;font-weight:500}.summary-confirm{background:#f0f5fd}@media(max-width:800px){.summary-grid{grid-template-columns:repeat(2,1fr)}}@media(max-width:500px){.summary-heading{align-items:flex-start;flex-direction:column}.summary-grid{grid-template-columns:1fr}}
 	.stepper button:disabled{cursor:default;opacity:.62}.history-note{align-self:center;color:#7b899d;font-size:12px}.completion-backdrop{position:fixed;inset:0;z-index:50;display:grid;place-items:center;padding:20px;background:rgba(21,39,71,.32)}.completion-dialog{display:grid;justify-items:center;gap:10px;width:min(390px,100%);padding:28px;border-radius:14px;color:#40516d;background:#fff;box-shadow:0 20px 55px rgba(18,35,66,.24);text-align:center}.completion-dialog :global(svg){color:#3d8b5b}.completion-dialog h3{margin:0;color:#263958;font-size:20px;font-weight:500}.completion-dialog p{margin:0;color:#718096;font-size:13px;line-height:1.5}.completion-dialog .primary{margin-top:6px}
