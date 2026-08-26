@@ -10,7 +10,6 @@
     "defaultItem": "dashboard",
     "enabledItems": [
       "dashboard",
-	  "system-info",
       "battery-strings",
       "assets",
       "serial-tcp",

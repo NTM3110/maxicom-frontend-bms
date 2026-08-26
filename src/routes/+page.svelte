@@ -106,7 +106,7 @@
 				<p>{deviceConfig?.device.subtitle ?? 'MAXiCom energy management platform'}</p>
 			</div>
 			<div class="topbar-actions">
-				<BmsConnection sessionRevision={bmsSessionRevision} onSessionChange={() => bmsSessionRevision += 1} />
+				<BmsConnection product={deviceConfig?.device.product} sessionRevision={bmsSessionRevision} onSessionChange={() => bmsSessionRevision += 1} />
 				<button class="notification-button" type="button" aria-label="Notifications"><Bell size={20} strokeWidth={2} aria-hidden="true" /></button>
 				<div class="user-menu-wrap">
 					<button class="user-menu-trigger" type="button" onclick={(event) => { event.stopPropagation(); userMenuOpen = !userMenuOpen; }} aria-haspopup="menu" aria-expanded={userMenuOpen}>

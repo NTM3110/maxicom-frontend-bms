@@ -14,7 +14,8 @@
 
 	let { config }: { config: DeviceConfig | null } = $props();
 	let configuredProduct = $derived(config?.device.product ?? 'unified');
-	let profile = $state<ProductProfile>('rts');
+	let selectedProfile = $state<ProductProfile>('rts');
+	let profile = $derived<ProductProfile>(configuredProduct === 'bms' ? 'bms' : configuredProduct === 'rts' ? 'rts' : selectedProfile);
 	let tab = $state<'serial' | 'tcp'>('serial');
 	let dialogOpen = $state(false);
 	let error = $state('');
@@ -34,7 +35,15 @@
 	let showProfileSwitch = $derived(configuredProduct === 'unified');
 	let showTcp = $derived(profile === 'rts' && (config?.connectivity.tcp ?? true));
 
-	onMount(() => { void loadRtsPorts(); if(hasBmsSession()) void loadBmsPorts(); });
+	onMount(() => {
+		if (configuredProduct === 'bms') {
+			if (hasBmsSession()) void loadBmsPorts();
+			else error = 'Your session has expired. Please sign in again.';
+			return;
+		}
+		void loadRtsPorts();
+		if (configuredProduct === 'unified' && hasBmsSession()) void loadBmsPorts();
+	});
 	async function loadRtsPorts(){try{const [edge,pids]=await Promise.all([getEdgeConfig(),getFelixPids()]);const pidFor=(id:string,factoryId:string,alias:string)=>pids.find((pid)=>pid.fpid===factoryId&&(pid.nameHint?.includes(`[${id}]`)||pid.nameHint?.includes(`[${alias}]`)))?.id;rtsPorts=Object.entries(edge.components).filter(([,component])=>component.factoryId==='Bridge.Modbus.Serial').map(([id,component])=>{const p=component.properties??{};const template=templates.find((item)=>item.key===id);return{componentId:id,pid:pidFor(id,'Bridge.Modbus.Serial',String(p.alias??id)),displayName:template?.displayName??String(p.alias??id),portName:String(p.portName??template?.portName??''),template:id,baudRate:String(p.baudRate??9600),databits:String(p.databits??8),stopbits:String(p.stopbits??'ONE'),parity:String(p.parity??'NONE')}});tcpBridges=Object.entries(edge.components).filter(([,component])=>component.factoryId==='Bridge.Modbus.Tcp').map(([id,component])=>{const p=component.properties??{};return{componentId:id,pid:pidFor(id,'Bridge.Modbus.Tcp',String(p.alias??id)),displayName:String(p.alias??id),ip:String(p.ip??''),port:Number(p.port??502)}});error='';}catch(cause){error=cause instanceof Error?cause.message:'Unable to load RTS Modbus bridges.';}}
 	async function loadBmsPorts(){ try { const ports=await listBmsSerialPorts(); bmsPorts=ports.map((port)=>({id:port.id,alias:port.alias,port:port.port,baudRate:String(port.baudRate),dataBits:String(port.dataBits),stopBits:String(port.stopBits),parity:port.parity})); } catch(cause){ error=cause instanceof Error?cause.message:'Unable to load BMS serial ports.'; } }
 
@@ -79,7 +88,7 @@
 	function editRtsSerial(port:(typeof rtsPorts)[number]){editingRtsId=port.componentId;editingRtsPid=port.pid??null;rtsSerial={template:port.template,baudRate:port.baudRate,databits:port.databits,stopbits:port.stopbits,parity:port.parity};tab='serial';dialogOpen=true;error='';}
 	function editRtsTcp(bridge:(typeof tcpBridges)[number]){editingRtsId=bridge.componentId;editingRtsPid=bridge.pid??null;tcp={displayName:bridge.displayName,ip:bridge.ip,port:bridge.port};tab='tcp';dialogOpen=true;error='';}
 	async function removeRts(componentId:string,pid?:string){if(!confirm(`Delete ${componentId}?`))return;try{if(!pid)throw new Error(`Could not find Felix PID for ${componentId}.`);await deleteFelixComponent(pid);await loadRtsPorts();notice=`${componentId} deleted.`;}catch(cause){error=cause instanceof Error?cause.message:'Unable to delete RTS bridge.';}}
-	function selectProfile(value: ProductProfile) { profile = value; tab = 'serial'; notice = ''; }
+	function selectProfile(value: ProductProfile) { selectedProfile = value; tab = 'serial'; notice = ''; }
 </script>
 
 <section class="page">

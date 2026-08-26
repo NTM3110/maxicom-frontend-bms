@@ -1,7 +1,7 @@
 import { browser } from '$app/environment';
 
 const STORAGE_KEY = 'maxicom-backend-settings';
-const DEFAULT_BMS_HOST = hostFromUrl(String(import.meta.env.VITE_BMS_DEFAULT_HOST ?? import.meta.env.VITE_OPENEMS_WS_URL ?? ''));
+const DEFAULT_BMS_HOST = 'localhost';
 const DEFAULT_RTS_HOST = hostFromUrl(String(import.meta.env.VITE_RTS_DEFAULT_HOST ?? import.meta.env.VITE_RTS_WS_URL ?? ''));
 
 export type BackendSettings = {
@@ -31,10 +31,16 @@ function normalizeHost(value: string, stripPort = false) {
 	}
 }
 
+function isLoopbackHost(value: string) {
+	const hostname = value.replace(/^\[|\]$/g, '').toLowerCase();
+	return hostname === 'localhost' || hostname === '::1' || /^127(?:\.\d{1,3}){3}$/.test(hostname);
+}
+
 export function defaultBackendSettings(): BackendSettings {
+	const pageHost = browser ? window.location.hostname : '127.0.0.1';
 	return {
-		bmsHost: DEFAULT_BMS_HOST || (browser ? window.location.hostname : '127.0.0.1'),
-		rtsHost: DEFAULT_RTS_HOST || (browser ? window.location.hostname : '127.0.0.1')
+		bmsHost: DEFAULT_BMS_HOST,
+		rtsHost: DEFAULT_RTS_HOST || pageHost
 	};
 }
 
@@ -55,10 +61,11 @@ export function getBackendSettings(): BackendSettings {
 	}
 }
 
-export function saveBackendSettings(settings: BackendSettings) {
+export function saveBackendSettings(settings: BackendSettings, scope: 'all' | 'bms' = 'all') {
+	const current = getBackendSettings();
 	const normalized = {
 		bmsHost: normalizeHost(settings.bmsHost, true),
-		rtsHost: normalizeHost(settings.rtsHost)
+		rtsHost: scope === 'bms' ? current.rtsHost : normalizeHost(settings.rtsHost)
 	};
 	if (browser) localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
 	return normalized;
@@ -76,7 +83,7 @@ export function bmsWebSocketUrl() {
 
 export function bmsRestPath(path: string) {
 	const host = getBackendSettings().bmsHost;
-	if (host === DEFAULT_BMS_HOST) return path;
+	if (isLoopbackHost(host)) return path;
 	return `${pageProtocol('http')}//${host}:8888${path}`;
 }
 

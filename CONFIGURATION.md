@@ -12,22 +12,37 @@ Change this file before building or replace it in the deployed static assets to 
 - `authentication.defaultUser`: shared frontend sign-in account for BMS, RTS, or unified deployments. `passwordHash` is the lowercase SHA-256 value of the password. The supplied default is `admin / admin`.
 - `rts`: contains the RTS configuration imported from the Angular application: sidebar capabilities, Serial/TCP bridge templates, device-brand catalogs, device tiers, and system serial number.
 
-`static/config/device-config.bms.example.json` is a ready BMS example. Copy its contents into `device-config.json` for a BMS deployment.
+`static/config/device-config.bms.example.json` is a ready BMS example. Release
+packaging installs it as `device-config.json`. For local development, run
+`npm run dev:bms`; Vite serves the example as the active profile without
+overwriting the unified source file.
 
 ## Backend connection
 
-Copy `.env.example` to `.env.development` for local development and update the IP when the target device changes.
+The BMS development command supports a configurable same-origin REST proxy
+target:
 
-- `VITE_OPENEMS_WS_URL`: BMS OpenEMS JSON-RPC WebSocket. The original BMS frontend uses port `8085`.
-- `BMS_REST_TARGET`: BMS OpenMUC REST server used by configuration import/export, reset, CSV range export and legacy SOH schedules. The original development proxy uses port `8888`.
-- `VITE_BMS_DEFAULT_HOST`: BMS IP initially shown in the runtime connection dialog.
+- `BMS_REST_TARGET`: BMS OpenMUC REST server used by configuration import/export, reset, CSV range export and legacy SOH schedules. It defaults to `http://127.0.0.1:8888`.
 - `VITE_RTS_DEFAULT_HOST`: RTS IP initially shown in the runtime connection dialog.
 
-The browser continues to request relative `/rest/...` URLs, while Vite forwards them to `BMS_REST_TARGET`. A production web server should provide the same `/rest` reverse-proxy rule.
+For example:
 
-Users can change both backend IP addresses from **Backend connections** in the application header. The values are stored in browser `localStorage`, survive refreshes, and override the build-time defaults. BMS automatically uses ports `8085` (WebSocket) and `8888` (REST); RTS uses port `80` and `/jsonrpc`. Changing an address resets the existing socket before the connection is checked again.
+```sh
+BMS_REST_TARGET=http://BMS_HOST:8888 \
+npm run dev:bms
+```
 
-For a runtime IP different from the build-time proxy target, HTTP services are requested directly from that backend. Its web server must allow the frontend origin through CORS. WebSocket JSON-RPC does not use the HTTP proxy.
+For a loopback BMS host, the browser requests same-origin `/rest/...` paths and
+Vite forwards them to `BMS_REST_TARGET`. A production web server should provide
+the equivalent REST reverse-proxy rule.
+
+Users can change both backend IP addresses from **Backend connections** in the application header. The values are stored in browser `localStorage` and survive refreshes. The BMS JSON-RPC WebSocket always connects directly to the configured BMS host on port `8085`; `localhost` means the browser's own loopback interface and does not select `/openems` or the frontend origin. RTS remains separate and uses port `80` and `/jsonrpc`. Changing an address resets the existing socket before the connection is checked again.
+
+For a saved non-loopback BMS address, REST is also requested directly from that
+host on port `8888`, so its HTTP server must allow the frontend origin through
+CORS. For a loopback address, REST continues to use the same-origin proxy
+described above; this REST behavior does not change the direct BMS WebSocket
+endpoint.
 
 ## Application sign-in
 
