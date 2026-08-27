@@ -87,7 +87,7 @@
 	let dischargeStageIsAuthoritativeCurrent = $derived(Boolean(real && displayedDischargeStage
 		&& displayedDischargeStage.calibrationStageId === real.event.currentStageId));
 	let controlledDischargeProcess = $derived(real ? initialBaselineProcess(real, 'CONTROLLED_DISCHARGE') : null);
-	let configuredDischargeSamplingMinutes = $derived(dischargeProcessPropertyNumber('dischargeSamplingIntervalMinutes', 10));
+	let configuredDischargeSamplingMinutes = $derived(dischargeProcessConfigurationNumber('dischargeSamplingIntervalMinutes', 10));
 	let dischargeSamplingDirty = $derived(Boolean(real) && Number(dischargeSamplingMinutes) !== configuredDischargeSamplingMinutes);
 	let dischargeSamplingValid = $derived(Number.isInteger(Number(dischargeSamplingMinutes))
 		&& Number(dischargeSamplingMinutes) >= 1 && Number(dischargeSamplingMinutes) <= 1440);
@@ -121,10 +121,8 @@
 		voltageV: sample.averageVoltageV ?? (sample.cells.length ? sample.cells.reduce((sum, cell) => sum + (cell.voltageV ?? 0), 0) / sample.cells.length : 0),
 		usedAh: sample.rawUsedAh ?? 0
 	})));
-	let dischargeRecommendation = $derived(typeof controlledDischargeProcess?.properties?.recommendation === 'string'
-		? controlledDischargeProcess.properties.recommendation : null);
-	let dischargeBlockers = $derived(Array.isArray(controlledDischargeProcess?.properties?.blockers)
-		? controlledDischargeProcess.properties.blockers.filter((value): value is string => typeof value === 'string') : []);
+	let dischargeRecommendation = $derived(controlledDischargeProcess?.runtime?.recommendation ?? null);
+	let dischargeBlockers = $derived(controlledDischargeProcess?.runtime?.blockers ?? []);
 	let dischargeProgress = $derived(real ? initialBaselineProcess(real, 'CONTROLLED_DISCHARGE')?.state === 'COMPLETED' ? 100 : initialBaselineProcess(real, 'CONTROLLED_DISCHARGE')?.state === 'ACTIVE' ? 50 : 0 : dischargeStartedAt == null ? 0 : Math.min(100, Math.floor((now - dischargeStartedAt) / 120)));
 	let dischargeComplete = $derived(dischargeProgress >= 100);
 	let demoDischargedCapacity = $derived(((batteryString?.ratedCapacity ?? 200) * .984 * dischargeProgress / 100).toFixed(1));
@@ -322,7 +320,7 @@
 
 	function processMeasurementNumber(type: string, key: string) {
 		if (!real) return null;
-		const latest = initialBaselineProcess(real, type)?.properties?.latestMeasurement;
+		const latest = initialBaselineProcess(real, type)?.runtime?.latestMeasurement;
 		if (!latest || typeof latest !== 'object' || Array.isArray(latest)) return null;
 		const value = (latest as Record<string, unknown>)[key];
 		return typeof value === 'number' && Number.isFinite(value) ? value : null;
@@ -330,7 +328,7 @@
 
 	function processCheckpointNumber(type: string, key: string) {
 		if (!real) return null;
-		const checkpoint = initialBaselineProcess(real, type)?.properties?.checkpoint;
+		const checkpoint = initialBaselineProcess(real, type)?.runtime?.checkpoint;
 		if (!checkpoint || typeof checkpoint !== 'object' || Array.isArray(checkpoint)) return null;
 		const value = (checkpoint as Record<string, unknown>)[key];
 		return typeof value === 'number' && Number.isFinite(value) ? value : null;
@@ -338,7 +336,7 @@
 
 	function processCheckpointNestedNumber(type: string, parent: string, key: string) {
 		if (!real) return null;
-		const checkpoint = initialBaselineProcess(real, type)?.properties?.checkpoint;
+		const checkpoint = initialBaselineProcess(real, type)?.runtime?.checkpoint;
 		if (!checkpoint || typeof checkpoint !== 'object' || Array.isArray(checkpoint)) return null;
 		const nested = (checkpoint as Record<string, unknown>)[parent];
 		if (!nested || typeof nested !== 'object' || Array.isArray(nested)) return null;
@@ -348,13 +346,8 @@
 
 	function processRuntimeStatus(process: CalibrationProcess | null) {
 		if (!real || !process || (process.state !== 'ACTIVE' && process.state !== 'BLOCKED')) return null;
-		const properties = process.properties ?? {};
-		const blockers = Array.isArray(properties.blockers)
-			? properties.blockers.filter((value): value is string => typeof value === 'string' && value.length > 0)
-			: [];
-		const recommendation = typeof properties.recommendation === 'string'
-			? properties.recommendation
-			: null;
+		const blockers = process.runtime?.blockers.filter((value) => value.length > 0) ?? [];
+		const recommendation = process.runtime?.recommendation ?? null;
 		return blockers.length || recommendation ? { blockers, recommendation } : null;
 	}
 
@@ -419,12 +412,12 @@
 
 	function realProcessPolicyNumber(key: string, fallback: number) {
 		if (!real) return null;
-		const value = initialFloatProcess?.properties?.[key];
+		const value = initialFloatProcess?.configuration?.[key];
 		return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 	}
 
-	function dischargeProcessPropertyNumber(key: string, fallback: number) {
-		const value = controlledDischargeProcess?.properties?.[key];
+	function dischargeProcessConfigurationNumber(key: string, fallback: number) {
+		const value = controlledDischargeProcess?.configuration?.[key];
 		return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 	}
 
