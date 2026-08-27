@@ -12,7 +12,6 @@
 		appendCalibrationEvidence,
 		configureCalibrationFloatStablePolicy,
 		configureCalibrationDemoTimeScale,
-		configureCalibrationDischargeSampling,
 		createCalibrationEvent,
 		executeCalibrationStageAction,
 		getCalibrationEvent,
@@ -27,6 +26,7 @@
 		startCalibrationEvent,
 		startCalibrationProcess,
 		completeCalibrationProcess,
+		confirmCalibrationDischargeStopped,
 		type BatteryString,
 		type BmsStringTelemetry,
 		type CalibrationAllowedAction,
@@ -74,8 +74,12 @@
 	let canRedoViewedStage = $derived(!!event && !!viewedStage && !!currentStage && !event.closedAt
 		&& ['ACTIVE', 'BLOCKED', 'REVALIDATION_REQUIRED'].includes(event.status)
 		&& viewedStage.state === 'COMPLETED' && viewedStage.order < currentStage.order);
+	let safetyStoppedCurrentStage = $derived(event?.eventType === 'INITIAL_BASELINE' && currentStage?.type === 'DISCHARGE'
+		&& event.processes.some((process) => process.calibrationStageId === currentStage?.calibrationStageId
+			&& process.type === 'CONTROLLED_DISCHARGE' && process.dischargeRuntime?.safetyState === 'STOP_CONFIRMED')
+		? currentStage : null);
 	let initialBaselineRedoStage = $derived(event?.eventType === 'INITIAL_BASELINE' && currentStage
-		? event.stages.filter((stage) => stage.state === 'COMPLETED' && stage.order < currentStage.order).at(-1) ?? null
+		? safetyStoppedCurrentStage ?? event.stages.filter((stage) => stage.state === 'COMPLETED' && stage.order < currentStage.order).at(-1) ?? null
 		: null);
 	let canRedoInitialBaselineStage = $derived(!!event && !!currentStage && !!initialBaselineRedoStage && !event.closedAt
 		&& ['ACTIVE', 'BLOCKED', 'REVALIDATION_REQUIRED'].includes(event.status));
@@ -84,10 +88,11 @@
 		event, evidence: initialBaselineEvidence, samples: initialBaselineSamples, telemetry: liveTelemetry, busy: loading || mutating,
 		onEvidence: recordRealInitialBaselineEvidence, onStartProcess: startRealInitialBaselineProcess,
 		onConfigureDemoTimeScale: configureRealInitialBaselineDemoTimeScale,
-		onConfigureDischargeSampling: configureRealInitialBaselineDischargeSampling,
 		onConfigureFloatStablePolicy: configureRealInitialBaselineFloatStablePolicy,
 		onStartControlledDischarge: startRealInitialBaselineControlledDischarge,
-		onCompleteProcess: completeRealInitialBaselineProcess, onContinue: continueRealInitialBaseline,
+		onCompleteProcess: completeRealInitialBaselineProcess,
+		onConfirmDischargeStopped: confirmRealInitialBaselineDischargeStopped,
+		onContinue: continueRealInitialBaseline,
 		onExecuteAction: executeRealInitialBaselineAction, onRedoStage: redoRealInitialBaselineStage,
 		canRedoStage: canRedoInitialBaselineStage
 	} : null);
@@ -535,23 +540,6 @@
 		finally { mutating = false; }
 	}
 
-	async function configureRealInitialBaselineDischargeSampling(minutes: number) {
-		if (!event || !currentStage || event.eventType !== 'INITIAL_BASELINE'
-			|| currentStage.type !== 'WAITING_FOR_LOAD' || mutating) return;
-		const previous = event;
-		mutating = true;
-		error = '';
-		try {
-			applyEvent(await configureCalibrationDischargeSampling({
-				calibrationEventId: event.calibrationEventId,
-				calibrationStageId: currentStage.calibrationStageId,
-				expectedEventVersion: event.eventVersion,
-				dischargeSamplingIntervalMinutes: minutes
-			}));
-		} catch (cause) { await recoverAfterMutationFailure(cause, previous); }
-		finally { mutating = false; }
-	}
-
 	async function configureRealInitialBaselineFloatStablePolicy(policy: {
 		durationMinutes: number; voltageToleranceV: number; currentMinA: number; currentMaxA: number;
 	}) {
@@ -632,6 +620,20 @@
 		}
 	}
 	function completeRealInitialBaselineProcess(type: string) { void mutateRealInitialBaselineProcess(type, true); }
+	async function confirmRealInitialBaselineDischargeStopped() {
+		if (!event || !currentStage || event.eventType !== 'INITIAL_BASELINE' || mutating) return;
+		const process = event.processes.find((item) => item.type === 'CONTROLLED_DISCHARGE'
+			&& item.calibrationStageId === currentStage.calibrationStageId);
+		if (!process?.dischargeRuntime?.canConfirmDischargeStopped) return;
+		const previous = event;
+		mutating = true; error = ''; notice = '';
+		try {
+			applyEvent(await confirmCalibrationDischargeStopped(event.calibrationEventId,
+				currentStage.calibrationStageId, process.calibrationProcessId, event.eventVersion), true);
+			notice = 'Discharge stop confirmed. The event is blocked for Redo or Abort.';
+		} catch (cause) { await recoverAfterMutationFailure(cause, previous); }
+		finally { mutating = false; }
+	}
 	function continueRealInitialBaseline() {
 		const action = event?.allowedActions.find((item) => item.actionCode === 'COMPLETE_STAGE');
 		if (action) void executeAction(action);

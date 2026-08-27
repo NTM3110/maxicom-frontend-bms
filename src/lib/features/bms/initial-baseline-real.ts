@@ -17,11 +17,11 @@ export type InitialBaselineRealAdapter = {
 	busy: boolean;
 	onEvidence(type: string, value?: number, unit?: string, sampleId?: number): void;
 	onConfigureDemoTimeScale(factor: 1 | 60): void;
-	onConfigureDischargeSampling(minutes: number): void;
 	onConfigureFloatStablePolicy(policy: { durationMinutes: number; voltageToleranceV: number; currentMinA: number; currentMaxA: number }): void;
 	onStartProcess(type: string): void;
 	onStartControlledDischarge(): void;
 	onCompleteProcess(type: string): void;
+	onConfirmDischargeStopped(): void;
 	onContinue(): void;
 	onExecuteAction(action: CalibrationAllowedAction, reason: string, acknowledgedItems: string[]): void;
 	onRedoStage(reason: string): void;

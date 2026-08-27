@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { AlertTriangle, ArrowLeft, CheckCircle2, ClipboardCheck, Play } from '@lucide/svelte';
+	import { AlertTriangle, ArrowLeft, CheckCircle2, ClipboardCheck, Play, ShieldAlert } from '@lucide/svelte';
 	import type { BatteryString, CalibrationAllowedAction, CalibrationProcess, CalibrationStage } from '$lib/services/bms-api';
 	import type { InitialBaselineDemoCellResistance, InitialBaselineDemoTicket } from './initial-baseline-demo';
 	import DischargeTrendChart from './DischargeTrendChart.svelte';
@@ -10,6 +10,7 @@
 
 	const DEMO_STABLE_PERCENT_MS_PER_CONFIGURED_MINUTE = 20;
 	const RECOVERY_FLOAT_STABLE_DURATION_SECONDS = 60;
+	const DISCHARGE_PERIODIC_WALL_CLOCK_SECONDS = 30;
 
 	type BaselineStep = {
 		title: string;
@@ -50,8 +51,6 @@
 	let floatCurrentMaxInput = $state((ticket.floatCurrentMaxA ?? 0.2).toFixed(1));
 	let floatPolicyInputEventVersion = $state<number | null>(null);
 	let dischargeProfile = $state<'0.1C10' | '0.2C5'>('0.1C10');
-	let dischargeSamplingMinutes = $state('10');
-	let dischargeSamplingLastConfiguredMinutes = $state<number | null>(null);
 	let dischargeLoadConnected = $state(false);
 	let dischargeScheduled = $state(false);
 	let dischargeStartedAt = $state<number | null>(null);
@@ -87,17 +86,14 @@
 	let dischargeStageIsAuthoritativeCurrent = $derived(Boolean(real && displayedDischargeStage
 		&& displayedDischargeStage.calibrationStageId === real.event.currentStageId));
 	let controlledDischargeProcess = $derived(real ? initialBaselineProcess(real, 'CONTROLLED_DISCHARGE') : null);
-	let configuredDischargeSamplingMinutes = $derived(dischargeProcessConfigurationNumber('dischargeSamplingIntervalMinutes', 10));
-	let dischargeSamplingDirty = $derived(Boolean(real) && Number(dischargeSamplingMinutes) !== configuredDischargeSamplingMinutes);
-	let dischargeSamplingValid = $derived(Number.isInteger(Number(dischargeSamplingMinutes))
-		&& Number(dischargeSamplingMinutes) >= 1 && Number(dischargeSamplingMinutes) <= 1440);
+	let configuredDischargeSamplingSeconds = $derived(dischargeProcessConfigurationNumber(
+		'dischargeSamplingIntervalSeconds', DISCHARGE_PERIODIC_WALL_CLOCK_SECONDS));
 	let waitingForLoadCompleteAction = $derived(real?.event.allowedActions.find((action) => action.actionCode === 'COMPLETE_STAGE') ?? null);
 	let dischargeRevalidateAction = $derived(real?.event.allowedActions.find((action) => action.actionCode === 'REVALIDATE_STAGE') ?? null);
 	let dischargeRevalidationRequired = $derived(Boolean(real && dischargeStageIsAuthoritativeCurrent
 		&& (real.event.status === 'REVALIDATION_REQUIRED' || realCurrentStage?.state === 'REVALIDATION_REQUIRED')));
 	let startControlledDischargeDisabledReason = $derived(controlledDischargeStartDisabledReason());
 	let canStartControlledDischarge = $derived(startControlledDischargeDisabledReason === null);
-	let effectiveDischargeSamplingSeconds = $derived(Math.max(1, Math.ceil(configuredDischargeSamplingMinutes * 60 / (real ? prerequisiteDemoTimeScaleFactor() : 1))));
 	let realDischargeSamples = $derived(real && controlledDischargeProcess ? real.samples
 		.filter((sample) => sample.calibrationProcessId === controlledDischargeProcess?.calibrationProcessId
 			&& sample.processAttemptNumber === controlledDischargeProcess?.attemptNumber)
@@ -123,6 +119,7 @@
 	})));
 	let dischargeRecommendation = $derived(controlledDischargeProcess?.runtime?.recommendation ?? null);
 	let dischargeBlockers = $derived(controlledDischargeProcess?.runtime?.blockers ?? []);
+	let dischargeSafety = $derived(controlledDischargeProcess?.dischargeRuntime ?? null);
 	let dischargeProgress = $derived(real ? initialBaselineProcess(real, 'CONTROLLED_DISCHARGE')?.state === 'COMPLETED' ? 100 : initialBaselineProcess(real, 'CONTROLLED_DISCHARGE')?.state === 'ACTIVE' ? 50 : 0 : dischargeStartedAt == null ? 0 : Math.min(100, Math.floor((now - dischargeStartedAt) / 120)));
 	let dischargeComplete = $derived(dischargeProgress >= 100);
 	let demoDischargedCapacity = $derived(((batteryString?.ratedCapacity ?? 200) * .984 * dischargeProgress / 100).toFixed(1));
@@ -374,8 +371,6 @@
 		if (!real) return 'A real calibration event is required.';
 		if (real.busy) return 'Wait for the current backend request to finish.';
 		if (!dischargeLoadConnected) return 'Confirm the standard load connection and wait for persisted evidence readback.';
-		if (!dischargeSamplingValid) return 'Enter a whole sampling interval from 1 to 1440 calibration minutes.';
-		if (dischargeSamplingDirty) return 'Save the changed sampling interval before starting discharge.';
 		if (!controlledDischargeProcess) return 'Backend did not create CONTROLLED_DISCHARGE for this event.';
 		if (controlledDischargeProcess.state !== 'NOT_STARTED') return `CONTROLLED_DISCHARGE is ${controlledDischargeProcess.state}.`;
 		if (!dischargeStageIsAuthoritativeCurrent) return 'Return to the active discharge stage before starting the process.';
@@ -713,18 +708,16 @@
 		lowestCellVoltage = dischargeCutoff.toFixed(2);
 	}
 
-	function saveDischargeSampling() {
-		const minutes = Number(dischargeSamplingMinutes);
-		if (!real || !Number.isInteger(minutes) || minutes < 1 || minutes > 1440) return;
-		real.onConfigureDischargeSampling(minutes);
-	}
-
 	function startControlledDischarge() {
 		real?.onStartControlledDischarge();
 	}
 
 	function completeControlledDischarge() {
 		real?.onCompleteProcess('CONTROLLED_DISCHARGE');
+	}
+
+	function confirmDischargeStopped() {
+		real?.onConfirmDischargeStopped();
 	}
 
 	function startRecoveryCharge() {
@@ -777,14 +770,6 @@
 		dischargeLoadConnected = hasInitialBaselineEvidence(real, 'TEST_LOAD_CONNECTED');
 		dischargeScheduled = initialBaselineProcess(real, 'CONTROLLED_DISCHARGE')?.state !== 'NOT_STARTED';
 		dischargeResultRecorded = hasInitialBaselineEvidence(real, 'DISCHARGE_CUTOFF_REVIEWED');
-		// Preserve an operator edit across unrelated authoritative readbacks (for
-		// example TEST_LOAD_CONNECTED). Only adopt a backend value when this is the
-		// first readback or the input still equals the previously configured value.
-		if (dischargeSamplingLastConfiguredMinutes === null
-				|| Number(dischargeSamplingMinutes) === dischargeSamplingLastConfiguredMinutes) {
-			dischargeSamplingMinutes = configuredDischargeSamplingMinutes.toString();
-		}
-		dischargeSamplingLastConfiguredMinutes = configuredDischargeSamplingMinutes;
 		summaryApproved = hasInitialBaselineEvidence(real, 'BASELINE_SUMMARY_REVIEWED');
 		floatCurrent = realFloatSample?.domainCurrentA == null ? '—' : (Math.abs(realFloatSample.domainCurrentA) * 1000).toFixed(1);
 		midpointVoltage = realFloatSample?.midpointVoltageV?.toFixed(3) ?? '—';
@@ -906,13 +891,11 @@
 			</section>
 		{:else if selectedIndex === 3}
 			<section class="discharge-workflow">
-				<div class="discharge-controls"><label>Discharge profile<select bind:value={dischargeProfile} disabled={Boolean(real) || dischargeScheduled}>{#if real}<option value={real.event.configuration.dischargeMethod === 'C5' ? '0.2C5' : '0.1C10'}>{real.event.configuration.dischargeMethod === 'C5' ? '0.2C5 — 5 h' : '0.1C10 — 10 h'}</option>{:else}<option value="0.1C10">0.1C10 — 10 h</option><option value="0.2C5">0.2C5 — 5 h</option>{/if}</select></label><label>Test current (A)<input value={dischargeCurrent.toFixed(1)} readonly /></label><label>Cut-off / cell (VDC)<input value={dischargeCutoff.toFixed(2)} readonly /></label><label>Sampling interval (calibration min)<input type="number" min="1" max="1440" step="1" bind:value={dischargeSamplingMinutes} disabled={real ? displayedDischargePhase !== 'WAITING_FOR_LOAD' || !dischargeStageIsAuthoritativeCurrent || real.busy : dischargeScheduled} /><small>{real ? `${effectiveDischargeSamplingSeconds} wall-clock seconds at ${realDemoTimeScaleFactor}×` : 'Demo ticket setting'}</small></label></div>
-				<div class="safety-banner"><AlertTriangle size={18} /><div><strong>Stop condition</strong><span>Stop at the first cell reaching {dischargeCutoff.toFixed(2)} V/cell, or sooner if a safety alarm occurs.</span></div></div>
+				<div class="discharge-controls"><label>Discharge profile<select bind:value={dischargeProfile} disabled={Boolean(real) || dischargeScheduled}>{#if real}<option value={real.event.configuration.dischargeMethod === 'C5' ? '0.2C5' : '0.1C10'}>{real.event.configuration.dischargeMethod === 'C5' ? '0.2C5 — 5 h' : '0.1C10 — 10 h'}</option>{:else}<option value="0.1C10">0.1C10 — 10 h</option><option value="0.2C5">0.2C5 — 5 h</option>{/if}</select></label><label>Test current (A)<input value={dischargeCurrent.toFixed(1)} readonly /></label><label>Cut-off / cell (VDC)<input value={dischargeCutoff.toFixed(2)} readonly /></label><label>Sampling interval (wall-clock seconds)<input type="number" value={configuredDischargeSamplingSeconds} readonly /><small>Fixed backend cadence; demo time scale does not change persistence.</small></label></div>
+				<div class="safety-banner"><AlertTriangle size={18} /><div><strong>Stop condition</strong><span>{real ? `Continue until every configured cell reaches ${dischargeCutoff.toFixed(2)} V/cell; stop sooner only if a safety alarm occurs.` : `Stop at the first cell reaching ${dischargeCutoff.toFixed(2)} V/cell, or sooner if a safety alarm occurs.`}</span></div></div>
 					{#if real}
 						{#if displayedDischargePhase === 'WAITING_FOR_LOAD'}
-							<p class="duration-note"><b>Physical preparation:</b> keep the default sampling interval or save a changed value, then connect the approved test load. Start advances the persisted WAITING_FOR_LOAD stage and starts CONTROLLED_DISCHARGE as two versioned backend mutations.</p>
-							<button class="secondary schedule-discharge" disabled={real.busy || !dischargeSamplingDirty || !dischargeSamplingValid} onclick={saveDischargeSampling}>Save sampling interval</button>
-						{#if dischargeSamplingDirty}<p class="settings-error">Save the changed sampling interval before starting discharge.</p>{/if}
+							<p class="duration-note"><b>Physical preparation:</b> connect the approved test load. Start advances the persisted WAITING_FOR_LOAD stage and starts CONTROLLED_DISCHARGE as two versioned backend mutations. Historical samples use the fixed 30-second wall-clock cadence.</p>
 						<label class="charge-confirm"><input type="checkbox" checked={dischargeLoadConnected} onchange={(event) => confirmDischargeLoad(event.currentTarget.checked)} disabled={real.busy || !dischargeStageIsAuthoritativeCurrent} /><span><strong>Confirm standard load is connected</strong><small>Connect the approved test load before continuing to the discharge stage.</small></span></label>
 					{/if}
 					{#if dischargeLoadConnected || displayedDischargePhase === 'DISCHARGE' || displayedDischargePhase === 'LOAD_DISCONNECT'}
@@ -920,9 +903,14 @@
 							{#if showLiveDischargePreview}<p class="discharge-source-note"><b>Live pre-start preview.</b> These values come from the current BMS snapshot and are not calibration samples. After Start, this panel switches entirely to persisted discharge samples.</p>{/if}
 							<div class="live-charge-metrics"><div><span>{showLiveDischargePreview ? 'Live string voltage' : 'Persisted string voltage'}</span><strong>{displayedDischargeStringVoltage?.toFixed(3) ?? '—'} V</strong></div><div><span>{showLiveDischargePreview ? 'Live lowest cell voltage' : 'Persisted lowest cell voltage'}</span><strong>{displayedDischargeLowestCellVoltage?.toFixed(3) ?? '—'} V</strong></div><div><span>Depth of discharge</span><strong>{latestDischargeSample?.dodPct?.toFixed(2) ?? '—'}%</strong></div></div>
 							<DischargeTrendChart cutoffPerCell={dischargeCutoff} values={realDischargeTrend} />
-							{#if !latestDischargeSample}<p class="duration-note"><b>Waiting for persisted discharge data.</b> The chart and official discharge metrics appear after the process starts and the configured sampling interval elapses.</p>{/if}
+							{#if !latestDischargeSample}<p class="duration-note"><b>Waiting for persisted discharge data.</b> The chart and official discharge metrics appear after the process starts and the 30-second wall-clock interval elapses.</p>{/if}
 						</section>
 						{#if dischargeBlockers.length}<div class="process-runtime-warning"><AlertTriangle size={17} /><div><strong>Backend process blockers</strong>{#each dischargeBlockers as blocker}<span><b>{blocker}</b> — {processBlockerMessage(blocker)}</span>{/each}</div></div>{/if}
+						{#if dischargeSafety?.safetyState === 'LATCHED'}
+							<div class="safety-stop-warning"><ShieldAlert size={22} /><div><strong>Safety floor reached — stop the discharge load now</strong><span>The backend froze official capacity at {dischargeSafety.frozenUsedAh?.toFixed(3) ?? '—'} Ah. Physically disconnect the load, then wait for fresh near-zero current.</span>{#each dischargeSafety.safetyTriggerCells as trigger}<span>Cell #{trigger.cellIndex}: measured {trigger.voltageV.toFixed(3)} V</span>{/each}<button class="secondary warning-text" disabled={real.busy || !dischargeSafety.canConfirmDischargeStopped} onclick={confirmDischargeStopped}>Confirm discharge stopped</button>{#if !dischargeSafety.canConfirmDischargeStopped}<small>Waiting for the backend to confirm fresh near-zero current.</small>{/if}</div></div>
+						{:else if dischargeSafety?.safetyState === 'STOP_CONFIRMED'}
+							<div class="safety-stop-warning confirmed"><ShieldAlert size={22} /><div><strong>Discharge stopped and event blocked</strong><span>Official capacity remains frozen at {dischargeSafety.frozenUsedAh?.toFixed(3) ?? '—'} Ah. Use Redo stage or Abort calibration event.</span></div></div>
+						{/if}
 						{#if !controlledDischargeProcess}<div class="process-runtime-warning"><AlertTriangle size={17} /><div><strong>Controlled discharge process is unavailable</strong><span>Reload the event and verify that the backend created CONTROLLED_DISCHARGE for this workflow.</span></div></div>{/if}
 						{#if (displayedDischargePhase === 'WAITING_FOR_LOAD' || displayedDischargePhase === 'DISCHARGE') && controlledDischargeProcess?.state === 'NOT_STARTED'}
 							<button class="secondary schedule-discharge" disabled={!canStartControlledDischarge} title={startControlledDischargeDisabledReason ?? undefined} onclick={startControlledDischarge}><Play size={15} />Start discharge process</button>
@@ -939,7 +927,7 @@
 					{/if}
 				{:else}
 				<label class="charge-confirm"><input type="checkbox" checked={dischargeLoadConnected} onchange={(event) => confirmDischargeLoad(event.currentTarget.checked)} disabled={dischargeScheduled} /><span><strong>Confirm standard load is connected</strong><small>Connect the approved test load before scheduling the discharge event.</small></span></label>
-				{#if !dischargeScheduled}<button class="secondary schedule-discharge" disabled={!dischargeLoadConnected || !Number(dischargeSamplingMinutes)} onclick={scheduleDischarge}><Play size={15} />Schedule discharge event</button>{:else}
+				{#if !dischargeScheduled}<button class="secondary schedule-discharge" disabled={!dischargeLoadConnected} onclick={scheduleDischarge}><Play size={15} />Schedule discharge event</button>{:else}
 					<section class="selected-discharge"><header><div><span>Selected discharge event</span><strong>{dischargeComplete ? 'Cut-off reached / demo' : 'Running / demo'}</strong></div><b>{dischargeCurrent.toFixed(1)} A · {demoDischargedCapacity} Ah</b></header><DischargeTrendChart demo={true} cutoffPerCell={dischargeCutoff} progress={dischargeProgress} />{#if !dischargeComplete}<div class="discharge-running"><i></i><span>Discharging {formatDemoDuration(Math.min(12, Math.floor(dischargeProgress * .12)))} / 00:12 demo</span><b>{demoDischargedCapacity} Ah used</b></div>{/if}</section>
 					{#if dischargeComplete}<div class="discharge-results"><label>Discharged capacity (Ah)<input type="number" min="0" bind:value={dischargedCapacity} /></label><label>Lowest cell voltage (VDC)<input type="number" step="0.01" bind:value={lowestCellVoltage} /></label><label>Stop reason<select bind:value={dischargeStopReason}><option value="CELL_CUTOFF">Cell reached configured cut-off</option><option value="OPERATOR_STOP">Operator stopped test</option><option value="SAFETY_ALARM">Safety alarm</option></select></label></div>
 					<label class="charge-confirm"><input type="checkbox" checked={dischargeResultRecorded} onchange={(event) => confirmDischargeResult(event.currentTarget.checked)} /><span><strong>Confirm discharge result</strong><small>Capacity, lowest cell voltage and stop reason have been recorded.</small></span></label>{/if}
@@ -966,7 +954,7 @@
 	</fieldset>
 
 	{#if demoComplete}<div class="complete-banner"><CheckCircle2 size={18} /><span>Demo complete. The baseline report is ready for review.</span></div>{/if}
-	{#if !readOnly}<footer class="page-footer"><div class="footer-navigation"><button class="secondary" disabled={selectedIndex === 0} onclick={() => selectedIndex -= 1}>Back</button>{#if real}<button class="secondary" disabled={viewingActiveStep} onclick={() => selectedIndex = activeStepIndex}>Go to active stage</button>{/if}</div><div class="footer-actions">{#if real?.canRedoStage}<button class="secondary danger-text" disabled={real.busy} onclick={() => redoConfirmation = true}>Redo stage</button>{/if}{#if real}{#each real.event.allowedActions.filter((action) => action.actionCode === 'REVALIDATE_STAGE' || action.actionCode === 'ABORT_EVENT') as action}<button class="secondary" class:warning-text={action.intent === 'WARNING'} class:danger-text={action.intent === 'DANGER'} disabled={real.busy || !action.enabled} title={action.disabledReason ?? undefined} onclick={() => requestFooterAction(action)}>{action.label}</button>{/each}{/if}<button class="primary" disabled={!viewingActiveStep || !stepReady || Boolean(real?.busy)} onclick={nextStep}>{selectedIndex === steps.length - 1 ? (real ? 'Save' : 'Finish demo') : 'Next step'}</button></div></footer>{:else}<footer class="page-footer"><span class="history-note">Completed {ticket.completedAt ? new Date(ticket.completedAt).toLocaleString() : ''}</span><button class="primary" onclick={onBack}>Back to events</button></footer>{/if}
+	{#if !readOnly}<footer class="page-footer"><div class="footer-navigation"><button class="secondary" disabled={selectedIndex === 0} onclick={() => selectedIndex -= 1}>Back</button>{#if real}<button class="secondary" disabled={viewingActiveStep} onclick={() => selectedIndex = activeStepIndex}>Go to active stage</button>{/if}</div><div class="footer-actions">{#if real?.canRedoStage}<button class="secondary danger-text" disabled={real.busy} onclick={() => redoConfirmation = true}>Redo stage</button>{/if}{#if real}{#each real.event.allowedActions.filter((action) => action.actionCode === 'ABORT_EVENT' || (dischargeSafety?.safetyState !== 'STOP_CONFIRMED' && action.actionCode === 'REVALIDATE_STAGE')) as action}<button class="secondary" class:warning-text={action.intent === 'WARNING'} class:danger-text={action.intent === 'DANGER'} disabled={real.busy || !action.enabled} title={action.disabledReason ?? undefined} onclick={() => requestFooterAction(action)}>{action.label}</button>{/each}{/if}{#if dischargeSafety?.safetyState !== 'STOP_CONFIRMED'}<button class="primary" disabled={!viewingActiveStep || !stepReady || Boolean(real?.busy)} onclick={nextStep}>{selectedIndex === steps.length - 1 ? (real ? 'Save' : 'Finish demo') : 'Next step'}</button>{/if}</div></footer>{:else}<footer class="page-footer"><span class="history-note">Completed {ticket.completedAt ? new Date(ticket.completedAt).toLocaleString() : ''}</span><button class="primary" onclick={onBack}>Back to events</button></footer>{/if}
 	{#if redoConfirmation && real}<div class="completion-backdrop" role="presentation"><div class="completion-dialog action-dialog" role="dialog" aria-modal="true" aria-labelledby="redo-stage-title"><AlertTriangle size={28} /><h3 id="redo-stage-title">Redo stage</h3><p>This reopens the latest completed stage on the server and resets later stages. Historical audit rows stay unchanged.</p><label>Required reason<input bind:value={redoReason} disabled={real.busy} placeholder="Explain why this stage must be repeated" /></label><div><button class="secondary" disabled={real.busy} onclick={() => { redoConfirmation = false; redoReason = ''; }}>Cancel</button><button class="secondary danger-text" disabled={real.busy || !redoReason.trim()} onclick={() => { real.onRedoStage(redoReason); redoConfirmation = false; redoReason = ''; }}>Confirm redo stage</button></div></div></div>{/if}
 	{#if footerAction && real}<div class="completion-backdrop" role="presentation"><div class="completion-dialog action-dialog" role="dialog" aria-modal="true" aria-labelledby="event-action-title"><AlertTriangle size={28} /><h3 id="event-action-title">{footerAction.label}</h3><p>{footerActionDescription(footerAction)}</p>{#if footerAction.requiresReason}<label>Required reason<input bind:value={footerActionReason} disabled={real.busy} placeholder={footerAction.actionCode === 'ABORT_EVENT' ? 'Explain why this event must be aborted' : 'Explain why this stage must be revalidated'} /></label>{/if}{#if footerAction.requiresAcknowledgement}{#each footerAction.acknowledgementItems as item}<label class="action-ack"><input type="checkbox" disabled={real.busy} checked={footerAcknowledgedItems.includes(item)} onchange={(event) => footerAcknowledgedItems = event.currentTarget.checked ? [...new Set([...footerAcknowledgedItems, item])] : footerAcknowledgedItems.filter((value) => value !== item)} />Acknowledge {item.replaceAll('_', ' ')}</label>{/each}{/if}<div><button class="secondary" disabled={real.busy} onclick={() => footerAction = null}>Cancel</button><button class="secondary" class:warning-text={footerAction.intent === 'WARNING'} class:danger-text={footerAction.intent === 'DANGER'} disabled={real.busy || !actionReady(footerAction)} onclick={confirmFooterAction}>Confirm {footerAction.label}</button></div></div></div>{/if}
 	{#if completionDialog}<div class="completion-backdrop" role="presentation"><div class="completion-dialog" role="dialog" aria-modal="true" aria-labelledby="completion-title"><CheckCircle2 size={28} /><h3 id="completion-title">Initial Baseline completed</h3><p>The event summary has been saved. You can view it again from Events as a read-only record.</p><button class="primary" onclick={onBack}>Return to events</button></div></div>{/if}
@@ -995,4 +983,5 @@
 	.discharge-controls label,.discharge-results label,.baseline-measurement-grid label{font-weight:400}.discharge-controls input,.discharge-controls select,.discharge-results input,.discharge-results select,.baseline-measurement-grid label input[type=number],.loaded-ripple>input{border-color:transparent;background:#fff;box-shadow:inset 0 0 0 1px #e4eaf2}.discharge-controls input:focus,.discharge-controls select:focus,.discharge-results input:focus,.discharge-results select:focus,.baseline-measurement-grid label input[type=number]:focus,.loaded-ripple>input:focus{outline:none;box-shadow:inset 0 0 0 1px #7e9fd3,0 0 0 3px rgba(50,99,174,.1)}
 	.cooldown-workflow{display:grid;gap:11px}.cooldown-setup{display:grid;grid-template-columns:1fr auto auto auto;align-items:end;gap:12px;padding:14px;border-radius:9px;background:#f4f7fc}.cooldown-setup>div{display:grid;gap:4px}.cooldown-setup span{color:#718096;font-size:11px}.cooldown-setup strong{color:#40516d;font-size:13px;font-weight:500;line-height:1.4}.cooldown-setup label{display:grid;gap:5px}.cooldown-setup label>div{display:flex;align-items:center;gap:6px}.cooldown-setup input{width:66px;min-height:37px;padding:0 9px;border:1px solid #d7dfeb;border-radius:7px;color:#30415d;background:#fff;font:inherit;font-size:13px}.cooldown-setup small{color:#7b899d;font-size:10px}.cooldown-setup .secondary{min-height:37px;font-size:12px}.temperature-status{display:grid;gap:12px;padding:14px;border-radius:9px;background:#edf9f1}.temperature-status.failed{background:#fff4f2}.temperature-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}.temperature-metrics div{display:grid;gap:4px;padding:10px;border-radius:7px;background:rgba(255,255,255,.72)}.temperature-metrics span{color:#718096;font-size:10px}.temperature-metrics strong{color:#30415d;font-size:13px;font-weight:500}.duration-note,.timeout-note{margin:0;color:#6e7d93;font-size:11px;line-height:1.45}.duration-note b{color:#52647e;font-weight:500}.timeout-note{padding:8px 10px;border-radius:7px;color:#a74c3e;background:rgba(255,255,255,.55)}.manual-approval{display:grid;gap:9px;padding:14px;border-radius:9px;color:#815523;background:#fff8ea}.manual-approval strong{font-size:13px;font-weight:500}.manual-approval span{font-size:11px;line-height:1.45}.manual-approval input{width:100%;min-height:37px;padding:0 10px;border:1px solid #e5cf9e;border-radius:7px;color:#40516f;background:#fff;font:inherit;font-size:12px}.exception-confirm{display:flex;align-items:flex-start;gap:8px;padding:9px 10px;border-radius:7px;color:#6f4b20;background:rgba(255,255,255,.58);font-size:11px;line-height:1.4;cursor:pointer}.exception-confirm input{width:15px;height:15px;flex:none;margin:1px 0 0;accent-color:#b67a21}.manual-approval .secondary{justify-self:start;min-height:32px;font-size:12px}@media(max-width:650px){.cooldown-setup{grid-template-columns:1fr;align-items:stretch}.cooldown-setup label{justify-content:start}.temperature-metrics{grid-template-columns:1fr}}
 	.footer-actions{display:flex;justify-content:flex-end;gap:8px}.warning-text{color:#946019}.danger-text{color:#a13a32}.float-stable-warning,.process-runtime-warning{display:flex;align-items:flex-start;gap:9px;padding:11px 12px;border-radius:8px;color:#87541d;background:#fff8e8}.float-stable-warning :global(svg),.process-runtime-warning :global(svg){flex:none;margin-top:1px}.float-stable-warning div,.process-runtime-warning div{display:grid;gap:3px}.float-stable-warning strong,.process-runtime-warning strong{font-size:12px;font-weight:600}.float-stable-warning span,.float-stable-warning small,.process-runtime-warning span{font-size:11px;line-height:1.4}.float-stable-warning small{color:#806b50}.process-runtime-warning span b{font-weight:600}.action-dialog{justify-items:stretch;text-align:left}.action-dialog :global(svg){justify-self:center;color:#a56b22}.action-dialog label{display:grid;gap:5px;color:#52647e;font-size:12px}.action-dialog input:not([type=checkbox]){width:100%;min-height:37px;padding:0 10px;border:1px solid #d7dfeb;border-radius:7px;color:#30415d;background:#fff;font:inherit}.action-dialog>div{display:flex;justify-content:flex-end;gap:8px}.action-dialog .action-ack{display:flex;align-items:flex-start;gap:8px;line-height:1.4}.action-dialog .action-ack input{width:16px;height:16px;margin:0;accent-color:#b67a21}@media(max-width:650px){.footer-actions{width:100%;flex-wrap:wrap}.footer-actions button{flex:1}}
+	.safety-stop-warning{display:flex;align-items:flex-start;gap:10px;padding:15px;border:1px solid #eaa29a;border-radius:9px;color:#8f2922;background:#fff0ee}.safety-stop-warning :global(svg){flex:none}.safety-stop-warning>div{display:grid;gap:6px}.safety-stop-warning strong{font-size:14px}.safety-stop-warning span,.safety-stop-warning small{font-size:11px;line-height:1.45}.safety-stop-warning button{justify-self:start;margin-top:4px}.safety-stop-warning.confirmed{border-color:#e4bd76;color:#805118;background:#fff8e9}
 </style>
