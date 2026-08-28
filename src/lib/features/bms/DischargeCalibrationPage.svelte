@@ -10,7 +10,7 @@
 	import { formatCalibrationTime } from '$lib/services/calibration-time';
 	import {
 		appendCalibrationEvidence,
-		configureCalibrationDischargeSafetyFloor,
+		configureCalibrationDischargeMonitor,
 		configureCalibrationFloatStablePolicy,
 		configureCalibrationDemoTimeScale,
 		createCalibrationEvent,
@@ -50,6 +50,10 @@
 	let initialBaselineCurvePointPage = $state<CalibrationCurvePointPage | null>(null);
 	let initialBaselineCurvePointsLoading = $state(false);
 	let initialBaselineCurveRequestId = 0;
+	let eventDetailRequestId = 0;
+	let appliedEventDetailRequestId = 0;
+	let initialBaselineReadbackRequestId = 0;
+	let appliedInitialBaselineReadbackRequestId = 0;
 	let cellVoltagesExpanded = $state(false);
 	let loading = $state(true);
 	let mutating = $state(false);
@@ -96,7 +100,7 @@
 		onEvidence: recordRealInitialBaselineEvidence, onStartProcess: startRealInitialBaselineProcess,
 		onConfigureDemoTimeScale: configureRealInitialBaselineDemoTimeScale,
 		onConfigureFloatStablePolicy: configureRealInitialBaselineFloatStablePolicy,
-		onConfigureDischargeSafetyFloor: configureRealInitialBaselineDischargeSafetyFloor,
+		onConfigureDischargeMonitor: configureRealInitialBaselineDischargeMonitor,
 		onLoadCurvePoints: loadRealInitialBaselineCurvePoints,
 		onStartControlledDischarge: startRealInitialBaselineControlledDischarge,
 		onCompleteProcess: completeRealInitialBaselineProcess,
@@ -154,7 +158,9 @@
 			]);
 			const latest = events[0];
 			if (latest) {
-				applyEvent(await getCalibrationEvent(latest.calibrationEventId), true);
+				selectedEventId = latest.calibrationEventId;
+				const request = beginEventDetailRequest(latest.calibrationEventId);
+				applyEventDetailReadback(await getCalibrationEvent(latest.calibrationEventId), request, true);
 			} else {
 				event = null;
 				selectedEventId = 0;
@@ -173,10 +179,13 @@
 		error = '';
 		notice = '';
 		try {
-			const detail = await getCalibrationEvent(selectedEventId);
-			applyEvent(detail, true);
-			workflowOpen = opensStageWorkflow(detail);
-			reportOpen = detail.closedAt !== null;
+			const eventId = selectedEventId;
+			const request = beginEventDetailRequest(eventId);
+			const detail = await getCalibrationEvent(eventId);
+			if (applyEventDetailReadback(detail, request, true)) {
+				workflowOpen = opensStageWorkflow(detail);
+				reportOpen = detail.closedAt !== null;
+			}
 		} catch (cause) {
 			selectedEventId = event?.calibrationEventId ?? 0;
 			error = message(cause);
@@ -205,18 +214,51 @@
 		if (syncReadback && detail.eventType === 'INITIAL_BASELINE') void syncInitialBaselineReadback(detail);
 	}
 
+	type EventDetailRequest = {
+		requestId: number;
+		calibrationEventId: number;
+	};
+
+	function beginEventDetailRequest(calibrationEventId: number): EventDetailRequest {
+		return { requestId: ++eventDetailRequestId, calibrationEventId };
+	}
+
+	function applyEventDetailReadback(detail: CalibrationEventDetail, request: EventDetailRequest,
+		resetViewedStage = false) {
+		// Worker checkpoint updates intentionally keep eventVersion and
+		// measurementRevision unchanged. Use the completed-request watermark to
+		// accept those later polls, while still rejecting responses that arrive out
+		// of order. Do not compare with the latest issued request: a slow endpoint
+		// must still be able to complete while a newer poll is in flight.
+		if (detail.calibrationEventId !== request.calibrationEventId
+			|| selectedEventId !== request.calibrationEventId
+			|| request.requestId <= appliedEventDetailRequestId) return false;
+		const current = event;
+		if (current?.calibrationEventId === detail.calibrationEventId
+			&& (detail.eventVersion < current.eventVersion
+				|| (detail.eventVersion === current.eventVersion
+					&& detail.measurementRevision < current.measurementRevision))) return false;
+		appliedEventDetailRequestId = request.requestId;
+		applyEvent(detail, resetViewedStage);
+		return true;
+	}
+
 	async function syncInitialBaselineReadback(detail: CalibrationEventDetail) {
+		const requestId = ++initialBaselineReadbackRequestId;
 		try {
 			const [history, samples] = await Promise.all([
 				loadCalibrationHistory(detail.calibrationEventId), loadCalibrationSamples(detail.calibrationEventId)
 			]);
-			if (event?.calibrationEventId !== detail.calibrationEventId
+			if (requestId <= appliedInitialBaselineReadbackRequestId
+				|| event?.calibrationEventId !== detail.calibrationEventId
 				|| event.eventVersion !== detail.eventVersion
 				|| event.measurementRevision !== detail.measurementRevision) return;
+			appliedInitialBaselineReadbackRequestId = requestId;
 			initialBaselineEvidence = history.evidence;
 			initialBaselineSamples = samples;
 		} catch (cause) {
-			if (event?.calibrationEventId === detail.calibrationEventId
+			if (requestId > appliedInitialBaselineReadbackRequestId
+				&& event?.calibrationEventId === detail.calibrationEventId
 				&& event.eventVersion === detail.eventVersion
 				&& event.measurementRevision === detail.measurementRevision) error = message(cause);
 		}
@@ -324,10 +366,16 @@
 		error = '';
 		notice = '';
 		try {
-			const draft = event?.calibrationEventId === calibrationEventId
-				? event
-				: await getCalibrationEvent(calibrationEventId);
-			applyEvent(draft, true);
+			let draft = event?.calibrationEventId === calibrationEventId ? event : null;
+			if (!draft) {
+				selectedEventId = calibrationEventId;
+				const request = beginEventDetailRequest(calibrationEventId);
+				const detail = await getCalibrationEvent(calibrationEventId);
+				if (!applyEventDetailReadback(detail, request, true)) return;
+				draft = detail;
+			} else {
+				applyEvent(draft, true);
+			}
 			// startEvent owns the mutation guard; loading only protects the lookup.
 			loading = false;
 			await startEvent();
@@ -361,13 +409,15 @@
 		error = '';
 		notice = '';
 		try {
+			const request = beginEventDetailRequest(event.calibrationEventId);
 			const [detail, telemetry] = await Promise.all([
 				getCalibrationEvent(event.calibrationEventId), getBmsStringTelemetry(selectedStringIndex)
 			]);
-			applyEvent(detail);
-			liveTelemetry = telemetry;
-			if (!opensStageWorkflow(detail)) workflowOpen = false;
-			notice = 'Event state reloaded from the server.';
+			if (applyEventDetailReadback(detail, request)) {
+				liveTelemetry = telemetry;
+				if (!opensStageWorkflow(detail)) workflowOpen = false;
+				notice = 'Event state reloaded from the server.';
+			}
 		} catch (cause) {
 			error = message(cause);
 		} finally {
@@ -378,15 +428,17 @@
 	async function refreshFromServer() {
 		if (!event || loading || mutating || refreshing || event.closedAt) return;
 		const eventId = event.calibrationEventId;
+		const request = beginEventDetailRequest(eventId);
 		refreshing = true;
 		try {
 			const [refreshed, telemetry] = await Promise.all([
 				getCalibrationEvent(eventId), getBmsStringTelemetry(selectedStringIndex)
 			]);
-			liveTelemetry = telemetry;
 			if (event?.calibrationEventId === eventId && !loading && !mutating) {
-				applyEvent(refreshed);
-				if (!opensStageWorkflow(refreshed)) workflowOpen = false;
+				if (applyEventDetailReadback(refreshed, request)) {
+					liveTelemetry = telemetry;
+					if (!opensStageWorkflow(refreshed)) workflowOpen = false;
+				}
 			}
 		} catch {
 			// A background refresh must not replace an actionable operator error.
@@ -398,7 +450,8 @@
 	async function recoverAfterMutationFailure(cause: unknown, previous: CalibrationEventDetail) {
 		const failure = message(cause);
 		try {
-			applyEvent(await getCalibrationEvent(previous.calibrationEventId));
+			const request = beginEventDetailRequest(previous.calibrationEventId);
+			applyEventDetailReadback(await getCalibrationEvent(previous.calibrationEventId), request);
 		} catch {
 			event = previous;
 		}
@@ -603,7 +656,9 @@
 		finally { mutating = false; }
 	}
 
-	async function configureRealInitialBaselineDischargeSafetyFloor(safetyFloorVoltagePerCell: number) {
+	async function configureRealInitialBaselineDischargeMonitor(policy: {
+		safetyFloorVoltagePerCell: number; maxWrongCurrentDirectionSamples: number;
+	}) {
 		if (!event || !currentStage || event.eventType !== 'INITIAL_BASELINE'
 			|| currentStage.type !== 'WAITING_FOR_LOAD' || mutating) return;
 		const previous = event;
@@ -611,15 +666,16 @@
 		error = '';
 		notice = '';
 		try {
-			const updated = await configureCalibrationDischargeSafetyFloor({
+			const updated = await configureCalibrationDischargeMonitor({
 				calibrationEventId: event.calibrationEventId,
 				calibrationStageId: currentStage.calibrationStageId,
 				expectedEventVersion: event.eventVersion,
-				safetyFloorVoltagePerCell
+				...policy
 			});
 			applyEvent(updated, false, false);
 			await syncInitialBaselineReadback(updated);
-			notice = `Discharge safety floor saved at ${safetyFloorVoltagePerCell.toFixed(3)} V/cell.`;
+			notice = `Discharge monitor saved: safety floor ${policy.safetyFloorVoltagePerCell.toFixed(3)} V/cell, `
+				+ `${policy.maxWrongCurrentDirectionSamples} wrong-current samples allowed.`;
 		} catch (cause) { await recoverAfterMutationFailure(cause, previous); }
 		finally { mutating = false; }
 	}
@@ -670,7 +726,8 @@
 		} catch (cause) {
 			const failure = message(cause);
 			try {
-				applyEvent(await getCalibrationEvent(previous.calibrationEventId), true);
+				const request = beginEventDetailRequest(previous.calibrationEventId);
+				applyEventDetailReadback(await getCalibrationEvent(previous.calibrationEventId), request, true);
 			} catch {
 				// If stage completion succeeded but the follow-up call or reload failed,
 				// retain the newest response we actually received, never the stale input.
