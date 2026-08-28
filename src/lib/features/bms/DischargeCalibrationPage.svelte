@@ -10,6 +10,7 @@
 	import { formatCalibrationTime } from '$lib/services/calibration-time';
 	import {
 		appendCalibrationEvidence,
+		configureCalibrationDischargeSafetyFloor,
 		configureCalibrationFloatStablePolicy,
 		configureCalibrationDemoTimeScale,
 		createCalibrationEvent,
@@ -20,6 +21,7 @@
 		listBmsStrings,
 		listCalibrationEvents,
 		loadCalibrationHistory,
+		loadCalibrationCurvePoints,
 		loadCalibrationSamples,
 		monthlyInspectionAssessment,
 		redoCalibrationStage,
@@ -32,7 +34,7 @@
 		type CalibrationAllowedAction,
 		type CalibrationEventDetail,
 		type CalibrationEventSummary,
-		type CalibrationStage, type CalibrationManualEvidence, type CalibrationSample,
+		type CalibrationStage, type CalibrationCurvePointPage, type CalibrationManualEvidence, type CalibrationSample,
 		type DischargeCurrentDirection
 	} from '$lib/services/bms-api';
 
@@ -45,6 +47,9 @@
 	let liveTelemetry = $state<BmsStringTelemetry | null>(null);
 	let initialBaselineEvidence = $state<CalibrationManualEvidence[]>([]);
 	let initialBaselineSamples = $state<CalibrationSample[]>([]);
+	let initialBaselineCurvePointPage = $state<CalibrationCurvePointPage | null>(null);
+	let initialBaselineCurvePointsLoading = $state(false);
+	let initialBaselineCurveRequestId = 0;
 	let cellVoltagesExpanded = $state(false);
 	let loading = $state(true);
 	let mutating = $state(false);
@@ -85,10 +90,14 @@
 		&& ['ACTIVE', 'BLOCKED', 'REVALIDATION_REQUIRED'].includes(event.status));
 	let realInitialBaselineTicket = $derived(event?.eventType === 'INITIAL_BASELINE' ? mapRealInitialBaselineTicket(event, initialBaselineEvidence, initialBaselineSamples) : null);
 	let realInitialBaselineAdapter = $derived<InitialBaselineRealAdapter | null>(event?.eventType === 'INITIAL_BASELINE' ? {
-		event, evidence: initialBaselineEvidence, samples: initialBaselineSamples, telemetry: liveTelemetry, busy: loading || mutating,
+		event, evidence: initialBaselineEvidence, samples: initialBaselineSamples, telemetry: liveTelemetry,
+		curvePointPage: initialBaselineCurvePointPage, curvePointsLoading: initialBaselineCurvePointsLoading,
+		busy: loading || mutating,
 		onEvidence: recordRealInitialBaselineEvidence, onStartProcess: startRealInitialBaselineProcess,
 		onConfigureDemoTimeScale: configureRealInitialBaselineDemoTimeScale,
 		onConfigureFloatStablePolicy: configureRealInitialBaselineFloatStablePolicy,
+		onConfigureDischargeSafetyFloor: configureRealInitialBaselineDischargeSafetyFloor,
+		onLoadCurvePoints: loadRealInitialBaselineCurvePoints,
 		onStartControlledDischarge: startRealInitialBaselineControlledDischarge,
 		onCompleteProcess: completeRealInitialBaselineProcess,
 		onConfirmDischargeStopped: confirmRealInitialBaselineDischargeStopped,
@@ -127,6 +136,7 @@
 		initialBaselineTicket = selectedStringIndex ? loadInitialBaselineDemoTicket(selectedStringIndex) : null;
 		event = null;
 		liveTelemetry = null;
+		initialBaselineCurvePointPage = null;
 		events = [];
 		selectedEventId = 0;
 		viewedStageId = null;
@@ -176,6 +186,8 @@
 	}
 
 	function applyEvent(detail: CalibrationEventDetail, resetViewedStage = false, syncReadback = true) {
+		const previousCurveVersionId = event?.referenceCurve?.curveVersionId ?? null;
+		const curveVersionId = detail.referenceCurve?.curveVersionId ?? null;
 		event = detail;
 		selectedEventId = detail.calibrationEventId;
 		const existing = events.findIndex((item) => item.calibrationEventId === detail.calibrationEventId);
@@ -186,6 +198,10 @@
 		} else if (pendingDangerAction) {
 			pendingDangerAction = detail.allowedActions.find((action) => action.actionCode === pendingDangerAction?.actionCode) ?? null;
 		}
+		if (detail.eventType === 'INITIAL_BASELINE' && curveVersionId !== previousCurveVersionId) {
+			initialBaselineCurvePointPage = null;
+			if (detail.referenceCurve) void loadRealInitialBaselineCurvePoints(1, 0, 50);
+		}
 		if (syncReadback && detail.eventType === 'INITIAL_BASELINE') void syncInitialBaselineReadback(detail);
 	}
 
@@ -194,11 +210,36 @@
 			const [history, samples] = await Promise.all([
 				loadCalibrationHistory(detail.calibrationEventId), loadCalibrationSamples(detail.calibrationEventId)
 			]);
-			if (event?.calibrationEventId !== detail.calibrationEventId || event.eventVersion !== detail.eventVersion) return;
+			if (event?.calibrationEventId !== detail.calibrationEventId
+				|| event.eventVersion !== detail.eventVersion
+				|| event.measurementRevision !== detail.measurementRevision) return;
 			initialBaselineEvidence = history.evidence;
 			initialBaselineSamples = samples;
 		} catch (cause) {
-			if (event?.calibrationEventId === detail.calibrationEventId) error = message(cause);
+			if (event?.calibrationEventId === detail.calibrationEventId
+				&& event.eventVersion === detail.eventVersion
+				&& event.measurementRevision === detail.measurementRevision) error = message(cause);
+		}
+	}
+
+	async function loadRealInitialBaselineCurvePoints(cellIndex: number, offset: number, limit: number) {
+		if (!event?.referenceCurve || event.eventType !== 'INITIAL_BASELINE') return;
+		const eventId = event.calibrationEventId;
+		const curveVersionId = event.referenceCurve.curveVersionId;
+		const requestId = ++initialBaselineCurveRequestId;
+		initialBaselineCurvePointsLoading = true;
+		error = '';
+		try {
+			const page = await loadCalibrationCurvePoints({ calibrationEventId: eventId, curveVersionId,
+				cellIndex, offset, limit });
+			if (requestId === initialBaselineCurveRequestId && event?.calibrationEventId === eventId
+				&& event.referenceCurve?.curveVersionId === curveVersionId) {
+				initialBaselineCurvePointPage = page;
+			}
+		} catch (cause) {
+			if (requestId === initialBaselineCurveRequestId && event?.calibrationEventId === eventId) error = message(cause);
+		} finally {
+			if (requestId === initialBaselineCurveRequestId) initialBaselineCurvePointsLoading = false;
 		}
 	}
 
@@ -558,6 +599,27 @@
 				floatCurrentMinA: policy.currentMinA,
 				floatCurrentMaxA: policy.currentMaxA
 			}));
+		} catch (cause) { await recoverAfterMutationFailure(cause, previous); }
+		finally { mutating = false; }
+	}
+
+	async function configureRealInitialBaselineDischargeSafetyFloor(safetyFloorVoltagePerCell: number) {
+		if (!event || !currentStage || event.eventType !== 'INITIAL_BASELINE'
+			|| currentStage.type !== 'WAITING_FOR_LOAD' || mutating) return;
+		const previous = event;
+		mutating = true;
+		error = '';
+		notice = '';
+		try {
+			const updated = await configureCalibrationDischargeSafetyFloor({
+				calibrationEventId: event.calibrationEventId,
+				calibrationStageId: currentStage.calibrationStageId,
+				expectedEventVersion: event.eventVersion,
+				safetyFloorVoltagePerCell
+			});
+			applyEvent(updated, false, false);
+			await syncInitialBaselineReadback(updated);
+			notice = `Discharge safety floor saved at ${safetyFloorVoltagePerCell.toFixed(3)} V/cell.`;
 		} catch (cause) { await recoverAfterMutationFailure(cause, previous); }
 		finally { mutating = false; }
 	}
