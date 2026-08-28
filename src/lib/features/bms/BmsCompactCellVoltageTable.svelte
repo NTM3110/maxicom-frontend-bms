@@ -37,7 +37,7 @@
 					{#each cells as cell (cell.id)}
 						{@const invalid = issue(cell)}
 						<tr class:invalid-cell={invalid} title={invalid ? issueDescription(cell) : undefined}>
-							<td class="cell-id"><span>#{cell.id}</span>{#if invalid}<span class="status-flag" aria-hidden="true">Check</span><span class="sr-only">Attention: {issueDescription(cell)}</span>{/if}</td>
+							<td class="cell-id"><span>{cell.id}</span>{#if invalid}<span class="status-flag" aria-hidden="true">Check</span><span class="sr-only">Attention: {issueDescription(cell)}</span>{/if}</td>
 							<td>{value(cell.voltage)}</td>
 						</tr>
 					{/each}

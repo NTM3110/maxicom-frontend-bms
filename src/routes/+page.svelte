@@ -6,7 +6,6 @@
 	import LoginPage from '$lib/components/LoginPage.svelte';
 	import BatteryStringsPage from '$lib/features/bms/BatteryStringsPage.svelte';
 	import BmsDashboardPage from '$lib/features/bms/BmsDashboardPage.svelte';
-	import BmsStringDetailPage from '$lib/features/bms/BmsStringDetailPage.svelte';
 	import AssetManagementPage from '$lib/features/bms/AssetManagementPage.svelte';
 	import AccountWorkspace from '$lib/features/system/AccountWorkspace.svelte';
 	import DischargeCalibrationPage from '$lib/features/bms/DischargeCalibrationPage.svelte';
@@ -28,7 +27,6 @@
 	let compactViewport = $state(false);
 	let activeItem = $state<NavigationItem>(navigationGroups[0].items[0]);
 	let deviceConfig = $state<DeviceConfig | null>(null);
-	let selectedDashboardString = $state<number | null>(null);
 	let bmsSessionRevision = $state(0);
 	let authReady = $state(false);
 	let currentUser = $state<AppUser | null>(null);
@@ -53,7 +51,6 @@
 
 	function selectItem(item: NavigationItem) {
 		activeItem = item;
-		selectedDashboardString = null;
 	}
 
 	function handleAuthenticated(user: AppUser, password: string) {
@@ -69,7 +66,6 @@
 		userMenuOpen = false;
 		signOutApp();
 		currentUser = null;
-		selectedDashboardString = null;
 		void logoutBms().catch(() => undefined);
 	}
 
@@ -127,10 +123,8 @@
 
 		<main class="content" aria-label="Application content">
 			{#key bmsSessionRevision}
-			{#if activeItem.id === 'dashboard' && selectedDashboardString !== null}
-				<BmsStringDetailPage stringIndex={selectedDashboardString} onBack={() => selectedDashboardString = null} />
-			{:else if activeItem.id === 'dashboard'}
-				<BmsDashboardPage onOpenString={(stringIndex) => selectedDashboardString = stringIndex} />
+			{#if activeItem.id === 'dashboard'}
+				<BmsDashboardPage />
 			{:else if activeItem.id === 'status'}
 				<RtsStatusPage config={deviceConfig} />
 			{:else if activeItem.id === 'battery-strings'}
