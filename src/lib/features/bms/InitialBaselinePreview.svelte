@@ -34,6 +34,7 @@
 	let activeStepIndex = $derived(real ? initialBaselineStep(real.event) : Math.min(ticket.currentStep, steps.length - 1));
 	let viewingActiveStep = $derived(!real || selectedIndex === activeStepIndex);
 	let navigationEventId = $state<number | null>(null);
+	let navigationStageId = $state<number | null>(null);
 	let checkedItems = $state<Record<string, boolean>>({});
 	let demoComplete = $state(false);
 	let completionDialog = $state(false);
@@ -637,9 +638,10 @@
 
 	$effect(() => {
 		if (!real) return;
-		if (navigationEventId !== real.event.calibrationEventId) {
+		if (navigationEventId !== real.event.calibrationEventId || navigationStageId !== real.event.currentStageId) {
 			selectedIndex = initialBaselineStep(real.event);
 			navigationEventId = real.event.calibrationEventId;
+			navigationStageId = real.event.currentStageId;
 		}
 		checkedItems = {
 			'0-0': hasInitialBaselineEvidence(real, 'BATTERY_CHARGER_CONNECTIONS_CHECKED'),

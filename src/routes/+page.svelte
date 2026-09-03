@@ -32,6 +32,7 @@
 	let currentUser = $state<AppUser | null>(null);
 	let userMenuOpen = $state(false);
 	let calibrationStringIndex = $state(0);
+	let calibrationEventId = $state(0);
 	let visibleGroups = $derived(deviceConfig ? getNavigationForConfig(deviceConfig) : navigationGroups);
 	let effectiveSidebarCollapsed = $derived(sidebarCollapsed || compactViewport);
 
@@ -51,11 +52,13 @@
 	});
 
 	function selectItem(item: NavigationItem) {
+		if (item.id === 'calibration') calibrationEventId = 0;
 		activeItem = item;
 	}
 
-	function openCalibration(stringIndex: number) {
+	function openCalibration(stringIndex: number, eventId = 0) {
 		calibrationStringIndex = stringIndex;
+		calibrationEventId = eventId;
 		const item = visibleGroups.flatMap((group) => group.items).find((entry) => entry.id === 'calibration');
 		if (item) activeItem = item;
 	}
@@ -157,7 +160,7 @@
 			{:else if activeItem.id === 'wika'}
 				<DeviceConfigurationPage kind="wika" config={deviceConfig} />
 			{:else if activeItem.id === 'calibration'}
-				<DischargeCalibrationPage initialStringIndex={calibrationStringIndex} />
+				<DischargeCalibrationPage initialStringIndex={calibrationStringIndex} initialEventId={calibrationEventId} />
 			{:else if activeItem.id === 'assets'}
 				<AssetManagementPage />
 			{:else if activeItem.id === 'alerts'}

@@ -34,7 +34,7 @@
 		type CalibrationStage, type CalibrationManualEvidence, type CalibrationSample,
 		type DischargeCurrentDirection
 	} from '$lib/services/bms-api';
-	let { initialStringIndex = 0 }: { initialStringIndex?: number } = $props();
+	let { initialStringIndex = 0, initialEventId = 0 }: { initialStringIndex?: number; initialEventId?: number } = $props();
 
 	let strings = $state<BatteryString[]>([]);
 	let selectedStringIndex = $state(0);
@@ -105,7 +105,7 @@
 			currentDirection = config.dischargeCurrentDirection;
 			selectedStringIndex = strings.some((item) => item.stringIndex === initialStringIndex) ? initialStringIndex : (strings[0]?.stringIndex ?? 0);
 			initialBaselineTicket = selectedStringIndex ? loadInitialBaselineDemoTicket(selectedStringIndex) : null;
-			if (selectedStringIndex) await loadLatest();
+			if (selectedStringIndex) await loadLatest(initialEventId);
 		} catch (cause) {
 			error = message(cause);
 		} finally {
@@ -128,16 +128,19 @@
 		if (selectedStringIndex) await loadLatest();
 	}
 
-	async function loadLatest() {
+	async function loadLatest(preferredEventId = 0) {
 		loading = true;
 		error = '';
 		try {
 			[events, liveTelemetry] = await Promise.all([
 				listCalibrationEvents(selectedStringIndex), getBmsStringTelemetry(selectedStringIndex)
 			]);
-			const latest = events[0];
+			const latest = events.find(item => item.calibrationEventId === preferredEventId) ?? events.find(item => ['ACTIVE','BLOCKED','REVALIDATION_REQUIRED'].includes(item.status)) ?? events[0];
 			if (latest) {
-				applyEvent(await getCalibrationEvent(latest.calibrationEventId), true);
+				const detail = await getCalibrationEvent(latest.calibrationEventId);
+				applyEvent(detail, true);
+				workflowOpen = preferredEventId > 0 && opensStageWorkflow(detail);
+				reportOpen = preferredEventId > 0 && detail.closedAt !== null;
 			} else {
 				event = null;
 				selectedEventId = 0;
@@ -169,11 +172,13 @@
 	}
 
 	function applyEvent(detail: CalibrationEventDetail, resetViewedStage = false) {
+		const previousCurrentStageId = event?.currentStageId ?? null;
+		const wasViewingCurrentStage = viewedStageId === null || viewedStageId === previousCurrentStageId;
 		event = detail;
 		selectedEventId = detail.calibrationEventId;
 		const existing = events.findIndex((item) => item.calibrationEventId === detail.calibrationEventId);
 		events = existing < 0 ? [detail, ...events] : events.map((item, index) => index === existing ? detail : item);
-		if (resetViewedStage) {
+		if (resetViewedStage || (wasViewingCurrentStage && detail.currentStageId !== previousCurrentStageId)) {
 			viewedStageId = detail.currentStageId;
 			pendingDangerAction = null;
 		} else if (pendingDangerAction) {
