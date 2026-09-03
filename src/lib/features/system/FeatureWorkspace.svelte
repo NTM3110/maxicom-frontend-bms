@@ -15,7 +15,7 @@
 	let fields = $state<Record<string, string>>({});
 
 	const titles: Record<FeatureId, [string, string]> = {
-		assets:['Asset Management', 'Asset identity, owner details and battery test history.'],
+		assets:['System Info', 'System identity, battery configuration, installation and charging settings.'],
 		'hybrid-controller':['Hybrid Controller', 'Power limiting and charge/discharge optimization.'],
 		calibration:['Discharge Calibration', 'Battery discharge testing and calibration limits.'],
 		'serial-tcp':['Serial & TCP', 'RS‑485 serial ports and Modbus TCP bridges.'],

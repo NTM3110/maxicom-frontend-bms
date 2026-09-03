@@ -20,6 +20,7 @@
 		onEventSelect,
 		onStartDraft,
 		onCreate,
+		onDemo,
 		onResumeInitialBaseline,
 		onRemoveInitialBaseline,
 		onReload
@@ -38,6 +39,7 @@
 		onEventSelect: (value: number) => void;
 		onStartDraft: (calibrationEventId: number) => void;
 		onCreate: (eventType: 'INITIAL_BASELINE' | 'MONTHLY_INSPECTION') => void;
+		onDemo: () => void;
 		onResumeInitialBaseline: () => void;
 		onRemoveInitialBaseline: () => void;
 		onReload: () => void;
@@ -64,7 +66,7 @@
 	<section class="event-list" aria-labelledby="persisted-events-heading">
 		<div class="event-list-head"><div><h4 id="persisted-events-heading">Persisted events</h4><p>Select an event to start a draft, open an active workflow, or view a completed report.</p></div><span>{events.length} event{events.length === 1 ? '' : 's'}</span></div>
 		{#if initialBaselineTicket && initialBaselineTicket.status !== 'CANCELLED'}
-			<div class="event-row demo-ticket"><button class="event-select" disabled={loading || mutating} onclick={onResumeInitialBaseline}><span class="event-id">{initialBaselineTicket.id}</span><strong>INITIAL BASELINE</strong><span>{formatCalibrationTime(new Date(initialBaselineTicket.createdAt).toISOString())}</span><span>Local demo</span><span class="event-status">{initialBaselineTicket.status.replaceAll('_', ' ')}</span></button>{#if initialBaselineTicket.status === 'PRECHECK'}<button class="remove-ticket" disabled={loading || mutating} onclick={onRemoveInitialBaseline}>Delete</button>{:else if initialBaselineTicket.status !== 'COMPLETED'}<button class="resume-ticket" disabled={loading || mutating} onclick={onResumeInitialBaseline}>Resume</button>{/if}</div>
+			<div class="event-row demo-ticket"><button class="event-select" disabled={loading || mutating} onclick={onResumeInitialBaseline}><span class="event-id">{initialBaselineTicket.id}</span><strong>INITIAL BASELINE</strong><span>{formatCalibrationTime(new Date(initialBaselineTicket.createdAt).toISOString())}</span><span>Local demo</span><span class="event-status">{initialBaselineTicket.status.replaceAll('_', ' ')}</span></button>{#if initialBaselineTicket.status !== 'PRECHECK' && initialBaselineTicket.status !== 'COMPLETED'}<button class="resume-ticket" disabled={loading || mutating} onclick={onResumeInitialBaseline}>Resume</button>{/if}<button class="remove-ticket" disabled={loading || mutating} onclick={onRemoveInitialBaseline}>Remove</button></div>
 		{/if}
 		{#if events.length === 0 && !initialBaselineTicket}
 			<p class="no-events">No events have been created for this string.</p>
@@ -81,6 +83,9 @@
 						</button>
 						{#if item.status === 'DRAFT'}
 							<button class="start-draft" disabled={loading || mutating} onclick={() => onStartDraft(item.calibrationEventId)}>Start</button>
+						{/if}
+						{#if item.eventType === 'INITIAL_BASELINE'}
+							<button class="demo-event" disabled={loading || mutating} onclick={onDemo}>Demo</button>
 						{/if}
 					</div>
 				{/each}
@@ -103,7 +108,7 @@
 	.read-only span { color: #7b899d; font-size: 11px; }.read-only strong { color: #354965; font-size: 13px; }
 	.primary,.secondary { display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:41px;padding:0 14px;border-radius:8px;font:inherit;font-size:14px;font-weight:600;cursor:pointer; }
 	.primary { border:0;color:#fff;background:#1749ad; }.secondary { border:1px solid #d7dfeb;color:#40516f;background:#fff; }.primary:disabled,.secondary:disabled { opacity:.5;cursor:not-allowed; }
-	.event-list{margin-top:22px;border-top:1px solid #e8edf4;padding-top:17px}.event-list-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.event-list-head h4{margin:0;color:#30415d;font-size:14px}.event-list-head p,.no-events{margin:5px 0 0;color:#718096;font-size:12px}.event-list-head>span{color:#738198;font-size:12px}.event-rows{display:grid;gap:7px;margin-top:12px}.event-row{display:flex;align-items:stretch;min-height:44px;border:1px solid #e1e8f1;border-radius:8px;color:#3a4d69;background:#fff}.event-row:hover,.event-row.chosen{border-color:#9db7e7;background:#f4f8ff}.event-select{display:grid;grid-template-columns:58px minmax(180px,1.4fr) minmax(150px,1fr) minmax(100px,.7fr) auto;align-items:center;gap:12px;flex:1;min-width:0;padding:8px 11px;border:0;border-radius:8px;color:#3a4d69;background:transparent;font:inherit;font-size:12px;text-align:left;cursor:pointer}.event-select:focus-visible,.start-draft:focus-visible{outline:2px solid #1749ad;outline-offset:2px}.event-select:disabled,.start-draft:disabled{cursor:not-allowed;opacity:.6}.event-id{color:#3860ad;font-weight:700}.event-select strong{color:#2e415e;font-size:12px}.event-select>span:not(.event-id):not(.event-status){color:#718096}.event-status{justify-self:end;padding:4px 7px;border-radius:999px;color:#39567f;background:#edf3fb;font-size:10px;font-weight:700}.start-draft,.resume-ticket,.remove-ticket{align-self:center;margin-right:8px;min-height:29px;padding:0 10px;border:0;border-radius:6px;color:#fff;background:#1749ad;font:inherit;font-size:11px;font-weight:700;cursor:pointer}.remove-ticket{color:#9b3030;background:#fff0ef}.demo-ticket{margin-top:12px;border-color:#d8e5f7;background:#f5f9ff}
+	.event-list{margin-top:22px;border-top:1px solid #e8edf4;padding-top:17px}.event-list-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.event-list-head h4{margin:0;color:#30415d;font-size:14px}.event-list-head p,.no-events{margin:5px 0 0;color:#718096;font-size:12px}.event-list-head>span{color:#738198;font-size:12px}.event-rows{display:grid;gap:7px;margin-top:12px}.event-row{display:flex;align-items:stretch;min-height:44px;border:1px solid #e1e8f1;border-radius:8px;color:#3a4d69;background:#fff}.event-row:hover,.event-row.chosen{border-color:#9db7e7;background:#f4f8ff}.event-select{display:grid;grid-template-columns:58px minmax(180px,1.4fr) minmax(150px,1fr) minmax(100px,.7fr) auto;align-items:center;gap:12px;flex:1;min-width:0;padding:8px 11px;border:0;border-radius:8px;color:#3a4d69;background:transparent;font:inherit;font-size:12px;text-align:left;cursor:pointer}.event-select:focus-visible,.start-draft:focus-visible,.demo-event:focus-visible{outline:2px solid #1749ad;outline-offset:2px}.event-select:disabled,.start-draft:disabled,.demo-event:disabled{cursor:not-allowed;opacity:.6}.event-id{color:#3860ad;font-weight:700}.event-select strong{color:#2e415e;font-size:12px}.event-select>span:not(.event-id):not(.event-status){color:#718096}.event-status{justify-self:end;padding:4px 7px;border-radius:999px;color:#39567f;background:#edf3fb;font-size:10px;font-weight:700}.start-draft,.resume-ticket,.remove-ticket,.demo-event{align-self:center;margin-right:8px;min-height:29px;padding:0 10px;border:0;border-radius:6px;color:#fff;background:#1749ad;font:inherit;font-size:11px;font-weight:700;cursor:pointer}.remove-ticket{color:#9b3030;background:#fff0ef}.demo-event{color:#365f9f;background:#eaf1fc}.demo-ticket{margin-top:12px;border-color:#d8e5f7;background:#f5f9ff}
 	:global(.spinning) { animation: spin 1s linear infinite; }@keyframes spin { to { transform:rotate(360deg); } }
 	@media(max-width:1100px){.setup-grid{grid-template-columns:1fr 1fr}.setup-grid label,.setup-grid .primary{grid-column:1/-1}.event-select{grid-template-columns:58px minmax(170px,1fr) minmax(120px,.8fr) auto}.event-select>span:nth-of-type(2){display:none}}
 	@media(max-width:620px){.management-panel{padding:16px}.section-head{display:grid}.section-head .secondary{width:100%}.setup-grid{grid-template-columns:1fr}.read-only{grid-column:1}.event-list-head{display:grid}.event-select{grid-template-columns:48px minmax(0,1fr) auto}.event-select>span:nth-of-type(2),.event-select>span:nth-of-type(3){display:none}.event-select strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
