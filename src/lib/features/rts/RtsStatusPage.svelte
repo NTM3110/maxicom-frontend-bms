@@ -27,7 +27,7 @@
 	function vpnUp(item:any){const state=String(item.phase1Status??(item.enabled?'UP':'DOWN')).toUpperCase();return state==='UP'||state==='CONNECTED'}
 </script>
 
-<section class="page"><div class="head"><div><h2>System Status</h2><p>Live RTS platform, devices, connectivity and controller overview.</p></div><button class:loading class="refresh" disabled={loading} onclick={load}><RefreshCw size={17}/>Refresh</button></div>{#if error}<div class="request-error">{error}</div>{/if}
+<section class="page"><div class="head"><div><h2>Health Monitor</h2><p>Live Hybrid platform, devices, connectivity and controller overview.</p></div><button class:loading class="refresh" disabled={loading} onclick={load}><RefreshCw size={17}/>Refresh</button></div>{#if error}<div class="request-error">{error}</div>{/if}
 	<div class="grid">
 		<article class="card"><header><span class="blue"><Info size={20}/></span><h3>System Information</h3></header><div class="body">{@render Row('Serial Number',rts?.systemInfo?.serialNumber??'N/A')}{@render Row('Firmware',system.firmware??config?.systemInfo?.firmwareVersion??'N/A')}{#if tier}{@render Row('Configuration Tier',`${tier.label} · ${tier.maxInverters} inverters / ${tier.maxTotalPowerKW} kWp`)}{/if}</div></article>
 		<article class="card"><header><span class="blue"><Cpu size={20}/></span><h3>Task Manager</h3></header><div class="body">{@render Usage('CPU Usage',system.cpuUsage)}{@render Usage('RAM Usage',system.ramUsage)}{@render Usage('Disk Usage',system.diskUsage)}</div></article>

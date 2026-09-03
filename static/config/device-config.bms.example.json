@@ -7,9 +7,9 @@
     "subtitle": "Battery monitoring and management"
   },
   "navigation": {
-    "defaultItem": "dashboard",
+    "defaultItem": "health-monitor_bms",
     "enabledItems": [
-      "dashboard",
+      "health-monitor_bms",
       "battery-strings",
       "assets",
       "serial-tcp",

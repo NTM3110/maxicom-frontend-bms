@@ -37,6 +37,12 @@ machine, use:
 npm run dev:bms
 ```
 
+To run the Hybrid profile with its own **Health Monitor** entry, use:
+
+```sh
+npm run dev:hybrid
+```
+
 To use a BMS appliance on another host, expose the development server and enter
 the appliance IP address or hostname in **Backend connections**:
 
@@ -50,8 +56,8 @@ This also applies to `localhost`; the frontend does not replace the configured
 host with its own origin or the `/openems` development route. Select **Save &
 connect** after changing the address so the existing socket is reset.
 
-`dev:bms` serves `device-config.bms.example.json` at the active configuration
-URL without modifying the checked-in unified profile. For a loopback BMS host,
+`dev:bms` and `dev:hybrid` serve their matching example profile at the active
+configuration URL without modifying the checked-in unified profile. For a loopback BMS host,
 REST requests use the same-origin `/rest` route and Vite forwards them to
 `BMS_REST_TARGET` (default `http://127.0.0.1:8888`). A non-loopback BMS host is
 requested directly on port `8888` and must allow the frontend origin through

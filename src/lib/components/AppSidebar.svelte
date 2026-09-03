@@ -4,7 +4,7 @@
 
 	let {
 		collapsed = false,
-		activeItem = 'dashboard',
+		activeItem = 'health-monitor_bms',
 		groups,
 		onSelect,
 		onSignOut

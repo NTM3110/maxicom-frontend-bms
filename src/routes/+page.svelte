@@ -133,9 +133,9 @@
 
 		<main class="content" aria-label="Application content">
 			{#key bmsSessionRevision}
-			{#if activeItem.id === 'dashboard'}
+			{#if activeItem.id === 'health-monitor_bms'}
 				<BmsDashboardPage onOpenCalibration={openCalibration} />
-			{:else if activeItem.id === 'status'}
+			{:else if activeItem.id === 'health-monitor_hybrid'}
 				<RtsStatusPage config={deviceConfig} />
 			{:else if activeItem.id === 'battery-strings'}
 				<BatteryStringsPage />

@@ -6,6 +6,7 @@
 	"scripts": {
 		"dev": "vite dev",
 		"dev:bms": "MAXICOM_DEVICE_PROFILE=bms vite dev",
+		"dev:hybrid": "MAXICOM_DEVICE_PROFILE=hybrid vite dev",
 		"build": "vite build",
 		"preview": "vite preview",
 		"prepare": "svelte-kit sync || echo ''",

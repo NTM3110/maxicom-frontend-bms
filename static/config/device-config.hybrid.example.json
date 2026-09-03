@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "device": {
+    "product": "rts",
+    "name": "MAXiCom Hybrid",
+    "title": "Hybrid Energy Management",
+    "subtitle": "Hybrid energy monitoring and management"
+  },
+  "navigation": {
+    "defaultItem": "health-monitor_hybrid",
+    "enabledItems": [
+      "health-monitor_hybrid",
+      "inverters",
+      "meters",
+      "data-loggers",
+      "ess",
+      "wika",
+      "hybrid-controller",
+      "serial-tcp",
+      "network",
+      "vpn",
+      "alerts",
+      "maintenance"
+    ]
+  },
+  "connectivity": {
+    "serial": true,
+    "tcp": true
+  },
+  "authentication": {
+    "defaultUser": {
+      "username": "admin",
+      "passwordHash": "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918"
+    }
+  },
+  "systemInfo": {
+    "hardwareModel": "MAXiCom Hybrid Controller",
+    "firmwareVersion": "1.0.1",
+    "softwareVersion": "MAXiCom Platform 1.0"
+  },
+  "rts": {}
+}

@@ -1,6 +1,5 @@
 import {
 	Activity,
-	BellRing,
 	BatteryCharging,
 	Cable,
 	ChartNoAxesCombined,
@@ -8,7 +7,6 @@ import {
 	Database,
 	Gauge,
 	HardDrive,
-	Info,
 	MailWarning,
 	Network,
 	ShieldCheck,
@@ -26,13 +24,17 @@ export type NavigationItem = {
 
 export const navigationGroups: { label?: string; items: NavigationItem[] }[] = [
 	{
+		label: 'MONITORING & OPERATIONS',
 		items: [
-			{ id: 'dashboard', label: 'Health Monitor', icon: CircleGauge },
-			{ id: 'status', label: 'Status', icon: Activity }
+			{ id: 'health-monitor_bms', label: 'Health Monitor', icon: CircleGauge },
+			{ id: 'health-monitor_hybrid', label: 'Health Monitor', icon: Activity },
+			{ id: 'hybrid-controller', label: 'Hybrid Controller', icon: SlidersHorizontal },
+			{ id: 'calibration', label: 'Calibration Event', icon: ChartNoAxesCombined },
+			{ id: 'assets', label: 'Asset Management', icon: HardDrive }
 		]
 	},
 	{
-		label: 'DEVICES',
+		label: 'DEVICE CONFIGURATION',
 		items: [
 			{ id: 'battery-strings', label: 'Battery Strings', icon: BatteryCharging },
 			{ id: 'inverters', label: 'Inverters', icon: Gauge },
@@ -41,17 +43,6 @@ export const navigationGroups: { label?: string; items: NavigationItem[] }[] = [
 			{ id: 'ess', label: 'ESS / Storage', icon: BatteryCharging },
 			{ id: 'wika', label: 'Wika', icon: Gauge }
 		]
-	},
-	{
-		label: 'OPERATIONS',
-		items: [
-			{ id: 'hybrid-controller', label: 'Hybrid Controller', icon: SlidersHorizontal },
-			{ id: 'calibration', label: 'Calibration Event', icon: ChartNoAxesCombined }
-		]
-	},
-	{
-		label: 'MANAGEMENT',
-		items: [{ id: 'assets', label: 'Asset Management', icon: HardDrive }]
 	},
 	{
 		label: 'CONNECTIVITY',
@@ -64,7 +55,6 @@ export const navigationGroups: { label?: string; items: NavigationItem[] }[] = [
 	{
 		label: 'SYSTEM',
 		items: [
-			{ id: 'system-info', label: 'System Info', icon: Info },
 			{ id: 'alerts', label: 'Alerts', icon: MailWarning },
 			{ id: 'maintenance', label: 'Maintenance', icon: Wrench }
 		]

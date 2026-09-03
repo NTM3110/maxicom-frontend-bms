@@ -7,14 +7,14 @@ Change this file before building or replace it in the deployed static assets to 
 - `device.name`, `title`, `subtitle`: branding and header copy.
 - `navigation.enabledItems`: menu item IDs enabled for that deployment.
 - `navigation.defaultItem`: first workspace shown on opening the application.
-- Use `dashboard` for the BMS overview. Use `status` for the RTS System Status workspace; they intentionally remain separate so each can use its own API and layout.
+- Use `health-monitor_bms` for the BMS Health Monitor and `health-monitor_hybrid` for the Hybrid Health Monitor. Both tabs are displayed as **Health Monitor**, while their config IDs keep the API and layout variants separate. Legacy `dashboard` and `status` IDs are still accepted and mapped to the corresponding monitor.
 - `connectivity.tcp`: controls whether the TCP section appears inside the shared `Serial & TCP` workspace. Set it to `false` for BMS.
 - `authentication.defaultUser`: shared frontend sign-in account for BMS, RTS, or unified deployments. `passwordHash` is the lowercase SHA-256 value of the password. The supplied default is `admin / admin`.
 - `rts`: contains the RTS configuration imported from the Angular application: sidebar capabilities, Serial/TCP bridge templates, device-brand catalogs, device tiers, and system serial number.
 
-`static/config/device-config.bms.example.json` is a ready BMS example. Release
+`static/config/device-config.bms.example.json` and `static/config/device-config.hybrid.example.json` are ready BMS and Hybrid examples. Release
 packaging installs it as `device-config.json`. For local development, run
-`npm run dev:bms`; Vite serves the example as the active profile without
+`npm run dev:bms` or `npm run dev:hybrid`; Vite serves the selected example as the active profile without
 overwriting the unified source file.
 
 ## Backend connection

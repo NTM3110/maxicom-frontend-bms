@@ -7,11 +7,10 @@
     "subtitle": "Energy and battery management platform"
   },
   "navigation": {
-    "defaultItem": "dashboard",
+    "defaultItem": "health-monitor_bms",
     "enabledItems": [
-      "dashboard",
-      "status",
-	  "system-info",
+	  "health-monitor_bms",
+	  "health-monitor_hybrid",
       "battery-strings",
       "assets",
       "inverters",

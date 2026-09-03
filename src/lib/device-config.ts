@@ -52,7 +52,7 @@ const defaultConfig: DeviceConfig = {
 		subtitle: 'Real-time energy management'
 	},
 	navigation: {
-		defaultItem: 'dashboard',
+		defaultItem: 'health-monitor_hybrid',
 		enabledItems: navigationGroups.flatMap((group) => group.items.map((item) => item.id))
 	},
 	connectivity: {
@@ -67,8 +67,17 @@ const defaultConfig: DeviceConfig = {
 	}
 };
 
+const legacyNavigationAliases: Record<string, string> = {
+	dashboard: 'health-monitor_bms',
+	status: 'health-monitor_hybrid'
+};
+
+function normalizeNavigationId(id: string) {
+	return legacyNavigationAliases[id] ?? id;
+}
+
 export function getNavigationForConfig(config: DeviceConfig) {
-	const enabled = new Set(config.navigation.enabledItems);
+	const enabled = new Set(config.navigation.enabledItems.map(normalizeNavigationId));
 	return navigationGroups
 		.map((group) => ({
 			...group,
@@ -81,7 +90,8 @@ export function getNavigationForConfig(config: DeviceConfig) {
 
 export function getDefaultItem(config: DeviceConfig, groups = getNavigationForConfig(config)): NavigationItem {
 	const allItems = groups.flatMap((group) => group.items);
-	return allItems.find((item) => item.id === config.navigation.defaultItem)
+	const defaultItem = normalizeNavigationId(config.navigation.defaultItem);
+	return allItems.find((item) => item.id === defaultItem)
 		?? allItems[0]
 		?? navigationGroups[0].items[0];
 }
