@@ -1,7 +1,7 @@
 <script lang="ts">
 	export type CompactCellResistance = {
 		cellId: number;
-		resistanceMohm: number | null;
+		resistanceUohm: number | null;
 		quality?: string | null;
 		availabilityWarning?: string | null;
 	};
@@ -20,12 +20,12 @@
 	let averageResistance = $derived.by(() => {
 		const values = cells
 			.filter((cell) => averageEligibleResistance(cell))
-			.map((cell) => cell.resistanceMohm as number);
+			.map((cell) => cell.resistanceUohm as number);
 		return values.length === 0 ? null : values.reduce((total, value) => total + value, 0) / values.length;
 	});
 
 	function finiteResistance(cell: CompactCellResistance) {
-		return cell.resistanceMohm !== null && Number.isFinite(cell.resistanceMohm);
+		return cell.resistanceUohm !== null && Number.isFinite(cell.resistanceUohm);
 	}
 
 	function averageEligibleResistance(cell: CompactCellResistance) {
@@ -36,18 +36,18 @@
 
 	function resistanceOutlier(cell: CompactCellResistance) {
 		return finiteResistance(cell) && averageResistance !== null
-			&& (cell.resistanceMohm as number) > averageResistance * 1.25;
+			&& (cell.resistanceUohm as number) > averageResistance * 1.25;
 	}
 
 	function issue(cell: CompactCellResistance) {
-		return cell.resistanceMohm === null || !Number.isFinite(cell.resistanceMohm)
+		return cell.resistanceUohm === null || !Number.isFinite(cell.resistanceUohm)
 			|| cell.quality !== undefined && cell.quality !== 'VALID'
 			|| Boolean(cell.availabilityWarning?.trim());
 	}
 
 	function issueDescription(cell: CompactCellResistance) {
 		return [
-			cell.resistanceMohm === null || !Number.isFinite(cell.resistanceMohm) ? 'Resistance was not recorded' : null,
+			cell.resistanceUohm === null || !Number.isFinite(cell.resistanceUohm) ? 'Resistance was not recorded' : null,
 			cell.quality !== undefined && cell.quality !== 'VALID' ? `Quality: ${cell.quality ?? 'not recorded'}` : null,
 			cell.availabilityWarning?.trim() || null
 		].filter((part): part is string => Boolean(part)).join('. ');
@@ -57,7 +57,7 @@
 		return [
 			issue(cell) ? issueDescription(cell) : null,
 			resistanceOutlier(cell) && averageResistance !== null
-				? `High internal resistance: more than 125% of the ${averageResistance.toFixed(2)} mΩ cell average`
+				? `High internal resistance: more than 125% of the ${averageResistance.toFixed(0)} µΩ cell average`
 				: null
 		].filter((part): part is string => Boolean(part)).join('. ');
 	}
@@ -73,7 +73,7 @@
 			{#each groups as group, groupIndex}
 				<div class="cell-card">
 					<table aria-label={`Cell internal resistance group ${groupIndex + 1}`}>
-						<thead><tr><th>Cell ID</th><th>Resistance (mΩ)</th></tr></thead>
+						<thead><tr><th>Cell ID</th><th>Resistance (µΩ)</th></tr></thead>
 						<tbody>
 							{#each group as cell (cell.cellId)}
 								{@const invalid = issue(cell)}
@@ -81,7 +81,7 @@
 								{@const warning = invalid || outlier ? warningDescription(cell) : ''}
 								<tr class:invalid-cell={invalid} class:resistance-outlier={outlier} title={warning || undefined}>
 									<td class="cell-id"><span>#{cell.cellId}</span>{#if invalid}<span class="status-flag" aria-hidden="true">Check</span>{/if}{#if outlier}<span class="status-flag outlier-flag" aria-hidden="true">High IR</span>{/if}{#if warning}<span class="sr-only">Warning: {warning}</span>{/if}</td>
-									<td>{cell.resistanceMohm === null || !Number.isFinite(cell.resistanceMohm) ? '—' : cell.resistanceMohm.toFixed(2)}</td>
+									<td>{cell.resistanceUohm === null || !Number.isFinite(cell.resistanceUohm) ? '—' : cell.resistanceUohm.toFixed(0)}</td>
 								</tr>
 							{/each}
 						</tbody>

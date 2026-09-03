@@ -2,7 +2,7 @@ export type InitialBaselineDemoStatus = 'PRECHECK' | 'IN_PROGRESS' | 'CHARGING' 
 
 export type InitialBaselineDemoCellResistance = {
 	cellId: number;
-	resistanceMohm: number;
+	resistanceUohm: number;
 };
 
 export type InitialBaselineDemoVocCell = {
@@ -85,7 +85,34 @@ export function loadInitialBaselineDemoTicket(stringIndex: number) {
 	if (typeof window === 'undefined') return null;
 	try {
 		const raw = window.localStorage.getItem(storageKey(stringIndex));
-		return raw ? JSON.parse(raw) as InitialBaselineDemoTicket : null;
+		if (!raw) return null;
+		const parsed = JSON.parse(raw) as Omit<InitialBaselineDemoTicket, 'recoveryCellResistances'> & {
+			recoveryCellResistances?: Array<{
+				cellId: number;
+				resistanceUohm?: number;
+				resistanceMohm?: number;
+			}> | null;
+		};
+		// Migrate older browser-only demo tickets at the persistence boundary. The
+		// Stage 5 model and every newly stored ticket use the backend's canonical µΩ
+		// unit, so no downstream view has to remember an implicit mΩ conversion.
+		const legacyResistanceUnit = parsed.recoveryCellResistances?.some((cell) =>
+			!Number.isFinite(cell.resistanceUohm) && Number.isFinite(cell.resistanceMohm)) ?? false;
+		if (parsed.recoveryCellResistances) {
+			parsed.recoveryCellResistances = parsed.recoveryCellResistances.map((cell) => ({
+				cellId: cell.cellId,
+				resistanceUohm: Number.isFinite(cell.resistanceUohm)
+					? cell.resistanceUohm
+					: Number.isFinite(cell.resistanceMohm) ? (cell.resistanceMohm as number) * 1000 : 0
+			}));
+		}
+		if (legacyResistanceUnit && parsed.summary) {
+			const legacyAverage = Number(parsed.summary.internalResistance);
+			if (Number.isFinite(legacyAverage)) {
+				parsed.summary.internalResistance = (legacyAverage * 1000).toFixed(2);
+			}
+		}
+		return parsed as InitialBaselineDemoTicket;
 	} catch { return null; }
 }
 

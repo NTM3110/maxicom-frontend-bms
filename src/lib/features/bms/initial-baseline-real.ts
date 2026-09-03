@@ -20,6 +20,9 @@ export type InitialBaselineRealAdapter = {
 	onEvidence(type: string, value?: number, unit?: string, sampleId?: number): void;
 	onConfigureDemoTimeScale(factor: 1 | 60): void;
 	onConfigureFloatStablePolicy(policy: { durationMinutes: number; voltageToleranceV: number; currentMinA: number; currentMaxA: number }): void;
+	onConfigureActiveFloatRange(processType: 'FLOAT_SETTLEMENT_TO_VFLOAT' | 'RECOVERY_FLOAT_STABILIZATION', currentMinA: number, currentMaxA: number, reason: string): Promise<void>;
+	onConfigureActiveVocDeadband(deadbandA: number, reason: string): Promise<void>;
+	onConfirmRecoveryLoadConnected(): Promise<void>;
 	onConfigureDischargeMonitor(policy: { safetyFloorVoltagePerCell: number; maxWrongCurrentDirectionSamples: number }): void;
 	onLoadCurvePoints(cellIndex: number, offset: number, limit: number): void;
 	onStartProcess(type: string): void;

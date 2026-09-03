@@ -80,10 +80,36 @@
 	let rippleWithLoadMeasured = $state(ticket.rippleWithLoadMeasured ?? false);
 	let recoveryBaselineAccepted = $state(ticket.vocBaselineConfirmed ?? false);
 	let summaryApproved = $state(false);
+	let returnToServiceApproved = $state(false);
 	let floatCurrent = $state(ticket.floatCurrent ?? '82');
 	let midpointVoltage = $state(ticket.midpointVoltage || (floatVoltage / 2).toFixed(1));
 	let rippleNoLoad = $state(ticket.rippleNoLoad ?? '0.6');
 	let rippleWithLoad = $state(ticket.rippleWithLoad ?? '0.8');
+	let manualMeasurementEventId = $state<number | null>(null);
+	let rippleNoLoadEvidenceId = $state<number | null>(null);
+	let rippleWithLoadEvidenceId = $state<number | null>(null);
+	let rippleNoLoadDirty = $state(false);
+	let rippleWithLoadDirty = $state(false);
+	let rippleNoLoadFocused = $state(false);
+	let rippleWithLoadFocused = $state(false);
+	let rippleNoLoadSubmissionPending = $state(false);
+	let rippleWithLoadSubmissionPending = $state(false);
+	let initialFloatPolicyEditor = $state(false);
+	let initialFloatPolicyReason = $state('');
+	async function submitInitialFloatPolicy() {
+		const minA = Number(floatCurrentMinInput);
+		const maxA = Number(floatCurrentMaxInput);
+		if (!real || real.busy || !initialFloatPolicyReason.trim() || !Number.isFinite(minA)
+				|| !Number.isFinite(maxA) || minA < 0 || maxA < minA) return;
+		try {
+			await real.onConfigureActiveFloatRange('FLOAT_SETTLEMENT_TO_VFLOAT', minA, maxA,
+					initialFloatPolicyReason);
+			initialFloatPolicyEditor = false;
+			initialFloatPolicyReason = '';
+		} catch {
+			// The parent keeps the authoritative backend error and refreshed event visible.
+		}
+	}
 	let dischargeCurrent = $derived(configurationNumber('ratedCapacityAh', batteryString?.ratedCapacity ?? 200)
 		* (real?.event.configuration.dischargeMethod === 'C5' || !real && dischargeProfile === '0.2C5' ? 0.2 : 0.1));
 	let dischargeCutoff = $derived(configurationNumber('cutoffVoltagePerCell', dischargeProfile === '0.2C5' ? 1.75 : 1.8));
@@ -160,16 +186,41 @@
 	let dischargeProgress = $derived(real ? initialBaselineProcess(real, 'CONTROLLED_DISCHARGE')?.state === 'COMPLETED' ? 100 : initialBaselineProcess(real, 'CONTROLLED_DISCHARGE')?.state === 'ACTIVE' ? 50 : 0 : dischargeStartedAt == null ? 0 : Math.min(100, Math.floor((now - dischargeStartedAt) / 120)));
 	let dischargeComplete = $derived(dischargeProgress >= 100);
 	let demoDischargedCapacity = $derived(((batteryString?.ratedCapacity ?? 200) * .984 * dischargeProgress / 100).toFixed(1));
-	let recoveryProgress = $derived(real ? initialBaselineProcess(real, 'RECOVERY_CHARGE_TO_VBOOST')?.state === 'COMPLETED' ? 100 : initialBaselineProcess(real, 'RECOVERY_CHARGE_TO_VBOOST')?.state === 'ACTIVE' ? 50 : 0 : recoveryStartedAt == null ? 0 : Math.min(100, Math.floor((now - recoveryStartedAt) / 120)));
-	let recoveryChargeComplete = $derived(real ? initialBaselineProcess(real, 'RECOVERY_CHARGE_TO_VBOOST')?.state === 'COMPLETED' : recoveryProgress >= 100);
-	let recoveryFloatProgress = $derived(recoveryFloatStartedAt == null ? 0 : Math.min(100, Math.floor((now - recoveryFloatStartedAt) / 60)));
-	let recoveryFloatReached = $derived(real ? initialBaselineProcess(real, 'RECOVERY_FLOAT_STABILIZATION')?.state === 'COMPLETED' : recoveryFloatProgress >= 100);
+	let recoveryBoostProcess = $derived(real ? initialBaselineProcess(real, 'RECOVERY_CHARGE_TO_VBOOST') : null);
+	let recoveryFloatProcess = $derived(real ? initialBaselineProcess(real, 'RECOVERY_FLOAT_STABILIZATION') : null);
+	let demoRecoveryProgress = $derived(recoveryStartedAt == null ? 0 : Math.min(100, Math.floor((now - recoveryStartedAt) / 120)));
+	let demoRecoveryFloatProgress = $derived(recoveryFloatStartedAt == null ? 0 : Math.min(100, Math.floor((now - recoveryFloatStartedAt) / 60)));
+	let recoveryStarted = $derived(real ? Boolean(recoveryBoostProcess && recoveryBoostProcess.state !== 'NOT_STARTED') : recoveryStartedAt !== null);
+	let recoveryChargeComplete = $derived(real ? recoveryBoostProcess?.state === 'COMPLETED' : demoRecoveryProgress >= 100);
+	let recoveryFloatStarted = $derived(real ? Boolean(recoveryFloatProcess && recoveryFloatProcess.state !== 'NOT_STARTED') : recoveryFloatStartedAt !== null);
 	let recoveryFloatElapsedSeconds = $derived(real ? Math.max(0, Math.floor((processCheckpointNumber('RECOVERY_FLOAT_STABILIZATION', 'stableDurationMillis') ?? 0) / 1000)) : recoveryFloatStableStartedAt == null ? 0 : Math.min(RECOVERY_FLOAT_STABLE_DURATION_SECONDS, Math.max(0, Math.floor((now - recoveryFloatStableStartedAt) / 1000))));
-	let recoveryFloatStableProgress = $derived(Math.floor(recoveryFloatElapsedSeconds * 100 / RECOVERY_FLOAT_STABLE_DURATION_SECONDS));
-	let recoveryFloatComplete = $derived(real ? initialBaselineProcess(real, 'RECOVERY_FLOAT_STABILIZATION')?.state === 'COMPLETED' : recoveryFloatElapsedSeconds >= RECOVERY_FLOAT_STABLE_DURATION_SECONDS);
+	let recoveryFloatStableSeconds = $derived(real
+		? Math.max(1, Math.round(processPolicyNumber('RECOVERY_FLOAT_STABILIZATION', 'floatStableDurationMinutes',
+			configurationNumber('floatStableDurationMinutes', 60)) * 60))
+		: RECOVERY_FLOAT_STABLE_DURATION_SECONDS);
+	let recoveryFloatStableProgress = $derived(Math.min(100,
+		Math.floor(recoveryFloatElapsedSeconds * 100 / recoveryFloatStableSeconds)));
+	let recoveryFloatComplete = $derived(real ? recoveryFloatProcess?.state === 'COMPLETED' : recoveryFloatElapsedSeconds >= RECOVERY_FLOAT_STABLE_DURATION_SECONDS);
 	let recoveryStartVoltage = $derived(dischargeCutoff * cellCount);
-	let recoveryBoostVoltage = $derived(real ? processMeasurementNumber('RECOVERY_CHARGE_TO_VBOOST', 'stringVoltageV') : recoveryStartVoltage + ((boostVoltage - recoveryStartVoltage) * recoveryProgress / 100));
-	let recoveryFloatVoltage = $derived(real ? processMeasurementNumber('RECOVERY_FLOAT_STABILIZATION', 'stringVoltageV') : boostVoltage - ((boostVoltage - floatVoltage) * recoveryFloatProgress / 100));
+	let recoveryBoostVoltage = $derived(real ? recoveryProcessMeasurementNumber('RECOVERY_CHARGE_TO_VBOOST', 'stringVoltageV') : recoveryStartVoltage + ((boostVoltage - recoveryStartVoltage) * demoRecoveryProgress / 100));
+	let recoveryBoostProcessedTemperatureC = $derived(processTemperature('RECOVERY_CHARGE_TO_VBOOST'));
+	let recoveryBoostEffectiveTargetVoltage = $derived(real ? effectiveProcessTargetVoltageV(
+		'RECOVERY_CHARGE_TO_VBOOST', 'boostStringVoltageV', boostVoltage, boostVoltagePerCell,
+		'boostTemperatureCoefficientMvPerCellC', -5) : boostVoltage);
+	let recoveryProgress = $derived(real ? processBarWidth(recoveryBoostVoltage, recoveryBoostEffectiveTargetVoltage) : demoRecoveryProgress);
+	let recoveryFloatVoltage = $derived(real ? recoveryProcessMeasurementNumber('RECOVERY_FLOAT_STABILIZATION', 'stringVoltageV') : boostVoltage - ((boostVoltage - floatVoltage) * demoRecoveryFloatProgress / 100));
+	let recoveryFloatProcessedTemperatureC = $derived(processTemperature('RECOVERY_FLOAT_STABILIZATION'));
+	let recoveryFloatEffectiveTargetVoltage = $derived(real ? effectiveProcessTargetVoltageV(
+		'RECOVERY_FLOAT_STABILIZATION', 'floatStringVoltageV', floatVoltage, floatVoltagePerCell,
+		'floatTemperatureCoefficientMvPerCellC', -3.3) : floatVoltage);
+	let recoveryFloatVoltageToleranceV = $derived(processPolicyNumber('RECOVERY_FLOAT_STABILIZATION',
+		'floatVoltageToleranceV', configurationNumber('floatVoltageToleranceV', ticket.floatVoltageToleranceV ?? 1)));
+	let recoveryFloatProgress = $derived(real ? processBarWidth(recoveryFloatVoltage, recoveryFloatEffectiveTargetVoltage) : demoRecoveryFloatProgress);
+	// RECOVERY_FLOAT_STABILIZATION is itself the authoritative Float settling and
+	// stable-window process. Show its stable monitor as soon as that process starts;
+	// the backend checkpoint (not a duplicated frontend voltage gate) decides when
+	// the observation window starts, resets, and completes.
+	let recoveryFloatReached = $derived(real ? recoveryFloatStarted : recoveryFloatProgress >= 100);
 	let recoveryFloatCurrentA = $derived(real ? processMeasurementNumber('RECOVERY_FLOAT_STABILIZATION', 'domainCurrentA') : recoveryFloatComplete
 		? ((ticket.floatCurrentMinA ?? 0.1) + (ticket.floatCurrentMaxA ?? 0.2)) / 2
 		: ticket.floatCurrentMaxA ?? 0.2);
@@ -186,6 +237,8 @@
 	let initialFloatVoltageToleranceV = $derived(realProcessPolicyNumber('floatVoltageToleranceV', real?.event.configuration.floatVoltageToleranceV ?? 1) ?? ticket.floatVoltageToleranceV ?? 1);
 	let initialFloatCurrentMinA = $derived(realProcessPolicyNumber('floatCurrentMinA', real?.event.configuration.floatCurrentMinA ?? 0.1) ?? ticket.floatCurrentMinA ?? 0.1);
 	let initialFloatCurrentMaxA = $derived(realProcessPolicyNumber('floatCurrentMaxA', real?.event.configuration.floatCurrentMaxA ?? 0.2) ?? ticket.floatCurrentMaxA ?? 0.2);
+	let canChangeInitialFloatRange = $derived(Boolean(real && viewingActiveStep && initialFloatProcess?.state === 'ACTIVE'
+		&& real.event.currentStageId === initialFloatProcess.calibrationStageId));
 	let effectiveBoostTargetVoltage = $derived(real ? effectiveBoostTargetVoltageV() : boostVoltage);
 	let effectiveFloatTargetVoltage = $derived(real ? effectiveFloatTargetVoltageV() : floatVoltage);
 	let boostProcessedTemperature = $derived(processTemperature('BOOST_CHARGE_TO_VBOOST'));
@@ -236,9 +289,11 @@
 	let displayedFloatCurrentA = $derived(real ? realFloatCurrentA : demoFloatCurrent);
 	let realVocSample = $derived(real ? finalProcessSample(real, 'VOC_BASELINE_CAPTURE') : null);
 	let realFloatSample = $derived(real ? finalProcessSample(real, 'RECOVERY_FLOAT_STABILIZATION') : null);
-	let recoveryCellResistances = $derived(real ? (realFloatSample?.cells ?? []).map((cell) => ({ cellId: cell.cellIndex, resistanceMohm: cell.resistanceUohm == null ? null : cell.resistanceUohm / 1000, quality: cell.quality, availabilityWarning: cell.availabilityWarning })) : ticket.recoveryCellResistances ?? []);
+	let recoveryCellResistances = $derived(real
+		? (realFloatSample?.cells ?? []).map((cell) => ({ cellId: cell.cellIndex, resistanceUohm: cell.resistanceUohm, quality: cell.quality, availabilityWarning: cell.availabilityWarning }))
+		: ticket.recoveryCellResistances ?? []);
 	let vocCells = $derived(real ? (realVocSample?.cells ?? []).map((cell) => ({ id: cell.cellIndex, voltage: cell.voltageV, quality: cell.quality, availabilityWarning: cell.availabilityWarning })) : (ticket.vocSnapshot?.cells ?? []).map((cell) => ({ id: cell.cellId, voltage: cell.voltageV, quality: 'VALID' })));
-	let validRecoveryResistances = $derived(recoveryCellResistances.map((cell) => cell.resistanceMohm).filter((value): value is number => value !== null && Number.isFinite(value)));
+	let validRecoveryResistances = $derived(recoveryCellResistances.map((cell) => cell.resistanceUohm).filter((value): value is number => value !== null && Number.isFinite(value)));
 	let internalResistance = $derived(validRecoveryResistances.length
 		? (validRecoveryResistances.reduce((total, value) => total + value, 0) / validRecoveryResistances.length).toFixed(2)
 		: '—');
@@ -265,27 +320,31 @@
 	let readOnly = $derived(real ? real.event.closedAt !== null : ticket.status === 'COMPLETED');
 	let summaryValues = $derived(ticket.summary ?? { stringVoltage: floatVoltage.toFixed(1), midpointVoltage, dischargedCapacity, initialSoh: initialSoh.toFixed(1), lowestCellVoltage, stopReason: dischargeStopReason, floatCurrent, internalResistance, ambientTemperature: temperatureText(ambientTemperature), temperatureDelta: temperatureText(cooldownTemperatureDelta), allowedTemperatureDelta: allowedTemperatureDelta.toFixed(1), rippleNoLoad, rippleWithLoad });
 	let cooldownReady = $derived(!!checkedItems['2-0'] && (cooldownTemperaturePassed || cooldownManualApproved) && !!checkedItems['2-1'] && !!checkedItems['2-2']);
-	let recoveryReviewComplete = $derived(real ? ['RECOVERY_FLOAT_STABILITY_REVIEWED', 'CELL_RESISTANCE_SAMPLE_REVIEWED',
-		'CHARGER_OUTPUT_CURRENT', 'MIDPOINT_VOLTAGE', 'RIPPLE_BEFORE_LOAD'].every((type) => hasInitialBaselineEvidence(real, type)) : false);
-	let recoveryReviewAwaitingContinue = $derived(real ? real.event.stages.some((stage) => stage.calibrationStageId === real.event.currentStageId
-		&& stage.type === 'POST_RECHARGE_FLOAT') && recoveryReviewComplete : false);
 	let stageFiveModel = $derived<InitialBaselineStageFiveModel>({
-		mode: real ? 'real' : 'demo', readOnly, busy: (real?.busy ?? false) || recoveryReviewAwaitingContinue, cellCount, boostVoltagePerCell, floatVoltagePerCell,
+		mode: real ? 'real' : 'demo', readOnly, busy: real?.busy ?? false, cellCount, boostVoltagePerCell, floatVoltagePerCell,
 		boostVoltage, floatVoltage, currentLimit, recoveryMcbClosed, recoverySettingsVerified,
-		recoveryStarted: recoveryStartedAt !== null, recoveryChargeComplete, recoveryProgress,
-		recoveryBoostVoltage,
-		recoveryFloatStarted: recoveryFloatStartedAt !== null, recoveryFloatReached,
-		recoveryFloatProgress, recoveryFloatVoltage, recoveryFloatCurrentA, recoveryFloatStableProgress,
-		recoveryFloatElapsedSeconds, recoveryFloatStableSeconds: RECOVERY_FLOAT_STABLE_DURATION_SECONDS,
+		recoveryStarted, recoveryChargeComplete, recoveryProgress,
+		recoveryBoostVoltage, recoveryBoostEffectiveTargetVoltage, recoveryBoostProcessedTemperatureC,
+		recoveryFloatStarted, recoveryFloatReached,
+		recoveryFloatProgress, recoveryFloatVoltage, recoveryFloatEffectiveTargetVoltage,
+		recoveryFloatProcessedTemperatureC, recoveryFloatVoltageToleranceV, recoveryFloatCurrentA, recoveryFloatStableProgress,
+		recoveryFloatElapsedSeconds, recoveryFloatStableSeconds,
 		recoveryFloatComplete, recoveryFloatConfirmed,
+		recoveryFloatCurrentMinA: processPolicyNumber('RECOVERY_FLOAT_STABILIZATION', 'floatCurrentMinA', initialFloatCurrentMinA),
+		recoveryFloatCurrentMaxA: processPolicyNumber('RECOVERY_FLOAT_STABILIZATION', 'floatCurrentMaxA', initialFloatCurrentMaxA),
+		canChangeRecoveryFloatRange: isExactActiveProcess('RECOVERY_FLOAT_STABILIZATION'),
 		resistanceCells: recoveryCellResistances, resistanceConfirmed: resistanceMeasured,
-		averageResistanceMohm: internalResistance, floatCurrent, floatCurrentConfirmed: floatCurrentMeasured,
+		averageResistanceUohm: internalResistance, floatCurrent, floatCurrentConfirmed: floatCurrentMeasured,
 		midpointVoltage, midpointConfirmed: midpointMeasured, rippleNoLoad, rippleNoLoadConfirmed: rippleNoLoadMeasured,
 		loadConnected: loadMcbClosed, rippleWithLoad, rippleWithLoadConfirmed: rippleWithLoadMeasured,
-		chargerMcbOpen: chargerOpenedForLoad, vocLoading: real ? false : chargerOpenedForLoad && !ticket.vocSnapshot,
+		chargerMcbOpen: chargerOpenedForLoad,
+		vocCurrentDeadbandA: processPolicyNumber('VOC_BASELINE_CAPTURE', 'vocCurrentDeadbandA', configurationNumber('currentDeadbandA', 0.1)),
+		canChangeVocDeadband: isExactActiveProcess('VOC_BASELINE_CAPTURE'),
+		vocLoading: real ? false : chargerOpenedForLoad && !ticket.vocSnapshot,
 		vocError: '', vocSampleId: realVocSample?.sampleId ?? ticket.vocSnapshot?.capturedAt ?? null,
 		vocCapturedAt: realVocSample?.measurementTime ?? (ticket.vocSnapshot ? new Date(ticket.vocSnapshot.capturedAt).toLocaleString() : null),
-		vocStringVoltage: realVocSample?.stringVoltageV ?? ticket.vocSnapshot?.stringVoltageV ?? null, vocCells,
+		vocStringVoltage: realVocSample?.stringVoltageV ?? ticket.vocSnapshot?.stringVoltageV ?? null,
+		vocCurrentA: realVocSample?.domainCurrentA ?? null, vocCells,
 		vocConfirmed: recoveryBaselineAccepted
 	});
 	const stageFiveActions: InitialBaselineStageFiveActions = {
@@ -301,10 +360,11 @@
 		},
 		startRecovery() { if (real) real.onStartProcess('RECOVERY_CHARGE_TO_VBOOST'); else startRecoveryCharge(); },
 		setRecoveryFloatConfirmed(checked) {
-			if (real) { if (checked) real.onEvidence('RECOVERY_FLOAT_STABILITY_REVIEWED'); return; }
+			if (real) { if (checked && realFloatSample) real.onEvidence('RECOVERY_FLOAT_STABILITY_REVIEWED', undefined, undefined, realFloatSample.sampleId); return; }
 			recoveryFloatConfirmed = checked;
 			updateTicket({ recoveryFloatConfirmed: checked });
 		},
+		async changeRecoveryFloatRange(minA, maxA, reason) { if (real) await real.onConfigureActiveFloatRange('RECOVERY_FLOAT_STABILIZATION', minA, maxA, reason); },
 		setResistanceConfirmed(checked) {
 			if (real) { if (checked && realFloatSample) real.onEvidence('CELL_RESISTANCE_SAMPLE_REVIEWED', undefined, undefined, realFloatSample.sampleId); return; }
 			resistanceMeasured = checked;
@@ -314,12 +374,30 @@
 		setFloatCurrentConfirmed(checked) { if (real) { if (checked && realFloatSample?.domainCurrentA != null) real.onEvidence('CHARGER_OUTPUT_CURRENT', Math.abs(realFloatSample.domainCurrentA), 'A', realFloatSample.sampleId); } else { floatCurrentMeasured = checked; updateTicket({ floatCurrentMeasured: checked }); } },
 		setMidpointVoltage(value) { if (!real) { midpointVoltage = value; updateTicket({ midpointVoltage: value }); } },
 		setMidpointConfirmed(checked) { if (real) { if (checked && realFloatSample?.midpointVoltageV != null) real.onEvidence('MIDPOINT_VOLTAGE', realFloatSample.midpointVoltageV, 'V', realFloatSample.sampleId); } else { midpointMeasured = checked; updateTicket({ midpointMeasured: checked }); } },
-		setRippleNoLoad(value) { rippleNoLoad = value; if (!real) updateTicket({ rippleNoLoad: value }); },
-		setRippleNoLoadConfirmed(checked) { if (real) { const value = Number(rippleNoLoad); if (checked && Number.isFinite(value) && value >= 0) real.onEvidence('RIPPLE_BEFORE_LOAD', value, 'V'); } else { rippleNoLoadMeasured = checked; updateTicket({ rippleNoLoadMeasured: checked }); } },
-		setLoadConnected(checked) { if (real) { if (checked) real.onEvidence('LOAD_CONNECTED_CONFIRMATION'); } else { loadMcbClosed = checked; updateTicket({ loadConnectedForRipple: checked }); } },
-		setRippleWithLoad(value) { rippleWithLoad = value; updateTicket({ rippleWithLoad: value }); },
-		setRippleWithLoadConfirmed(checked) { if (real) { if (checked) real.onEvidence('RIPPLE_AFTER_LOAD', Number(rippleWithLoad), 'V'); } else { rippleWithLoadMeasured = checked; updateTicket({ rippleWithLoadMeasured: checked }); } },
+		setRippleNoLoad(value) {
+			rippleNoLoad = value;
+			if (real) rippleNoLoadDirty = true;
+			else updateTicket({ rippleNoLoad: value });
+		},
+		setRippleNoLoadFocused(focused) { rippleNoLoadFocused = focused; },
+		setRippleNoLoadConfirmed(checked) { if (real) { const value = Number(rippleNoLoad); if (checked && Number.isFinite(value) && value >= 0) { rippleNoLoadSubmissionPending = true; real.onEvidence('RIPPLE_BEFORE_LOAD', value, 'V'); } } else { rippleNoLoadMeasured = checked; updateTicket({ rippleNoLoadMeasured: checked }); } },
+		async setLoadConnected(checked) {
+			if (real) {
+				if (checked) await real.onConfirmRecoveryLoadConnected();
+				return;
+			}
+			loadMcbClosed = checked;
+			updateTicket({ loadConnectedForRipple: checked });
+		},
+		setRippleWithLoad(value) {
+			rippleWithLoad = value;
+			if (real) rippleWithLoadDirty = true;
+			else updateTicket({ rippleWithLoad: value });
+		},
+		setRippleWithLoadFocused(focused) { rippleWithLoadFocused = focused; },
+		setRippleWithLoadConfirmed(checked) { if (real) { const value = Number(rippleWithLoad); if (checked && Number.isFinite(value) && value >= 0) { rippleWithLoadSubmissionPending = true; real.onEvidence('RIPPLE_AFTER_LOAD', value, 'V'); } } else { rippleWithLoadMeasured = checked; updateTicket({ rippleWithLoadMeasured: checked }); } },
 		setChargerMcbOpen: confirmChargerOpenedForVoc,
+		async changeVocDeadband(deadbandA, reason) { if (real) await real.onConfigureActiveVocDeadband(deadbandA, reason); },
 		setVocConfirmed(checked) {
 			if (real) { if (checked && realVocSample) real.onEvidence('VOC_BASELINE_CONFIRMATION', undefined, undefined, realVocSample.sampleId); return; }
 			recoveryBaselineAccepted = checked;
@@ -358,6 +436,15 @@
 		if (!latest || typeof latest !== 'object' || Array.isArray(latest)) return null;
 		const value = (latest as Record<string, unknown>)[key];
 		return typeof value === 'number' && Number.isFinite(value) ? value : null;
+	}
+
+	function recoveryProcessMeasurementNumber(type: 'RECOVERY_CHARGE_TO_VBOOST' | 'RECOVERY_FLOAT_STABILIZATION', key: 'stringVoltageV' | 'domainCurrentA') {
+		if (!real) return null;
+		const process = initialBaselineProcess(real, type);
+		const completedSample = process?.state === 'COMPLETED' ? finalProcessSample(real, type) : null;
+		const sampleValue = completedSample?.[key];
+		if (typeof sampleValue === 'number' && Number.isFinite(sampleValue)) return sampleValue;
+		return processMeasurementNumber(type, key);
 	}
 
 	function processCheckpointNumber(type: string, key: string) {
@@ -448,6 +535,18 @@
 		return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 	}
 
+	function processPolicyNumber(processType: string, key: string, fallback: number) {
+		if (!real) return fallback;
+		const value = initialBaselineProcess(real, processType)?.configuration?.[key];
+		return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+	}
+
+	function isExactActiveProcess(processType: string) {
+		if (!real) return false;
+		const process = initialBaselineProcess(real, processType);
+		return Boolean(process?.state === 'ACTIVE' && process.calibrationStageId === real.event.currentStageId);
+	}
+
 	function dischargeProcessConfigurationNumber<T extends number | null>(key: string, fallback: T) {
 		const value = controlledDischargeProcess?.configuration?.[key];
 		return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
@@ -467,7 +566,7 @@
 			?? null;
 	}
 
-	function processTemperature(type: 'BOOST_CHARGE_TO_VBOOST' | 'FLOAT_SETTLEMENT_TO_VFLOAT') {
+	function processTemperature(type: 'BOOST_CHARGE_TO_VBOOST' | 'FLOAT_SETTLEMENT_TO_VFLOAT' | 'RECOVERY_CHARGE_TO_VBOOST' | 'RECOVERY_FLOAT_STABILIZATION') {
 		if (!real) return null;
 		const process = initialBaselineProcess(real, type);
 		const completedSample = process?.state === 'COMPLETED' ? finalProcessSample(real, type) : null;
@@ -477,6 +576,18 @@
 		if (checkpointTemperature !== null) return checkpointTemperature;
 		const liveTemperature = real.telemetry?.summary.avgTemperature;
 		return typeof liveTemperature === 'number' && Number.isFinite(liveTemperature) ? liveTemperature : null;
+	}
+
+	function effectiveProcessTargetVoltageV(type: 'RECOVERY_CHARGE_TO_VBOOST' | 'RECOVERY_FLOAT_STABILIZATION',
+		checkpointTarget: 'boostStringVoltageV' | 'floatStringVoltageV', nominalTarget: number,
+		nominalCellTarget: number, coefficientKey: 'boostTemperatureCoefficientMvPerCellC' | 'floatTemperatureCoefficientMvPerCellC',
+		defaultCoefficient: number) {
+		const workerTarget = processCheckpointNestedNumber(type, 'targets', checkpointTarget);
+		if (workerTarget !== null) return workerTarget;
+		const averageTemperature = processTemperature(type);
+		if (averageTemperature === null) return nominalTarget;
+		const coefficientMvPerCellC = configurationNumber(coefficientKey, defaultCoefficient);
+		return (nominalCellTarget + coefficientMvPerCellC / 1000 * (averageTemperature - 25)) * cellCount;
 	}
 
 	function processBarWidth(actual: number | null, target: number) {
@@ -685,7 +796,7 @@
 	function createRecoveryCellResistances(): InitialBaselineDemoCellResistance[] {
 		return Array.from({ length: cellCount }, (_, index) => {
 			const cellId = index + 1;
-			return { cellId, resistanceMohm: Number((0.18 + ((cellId * 17 + ticket.stringIndex * 7) % 31) / 100).toFixed(2)) };
+			return { cellId, resistanceUohm: 1798 + ((cellId * 17 + ticket.stringIndex * 7) % 5) };
 		});
 	}
 
@@ -746,6 +857,11 @@
 	function confirmSummary(checked: boolean) {
 		if (real) { if (checked) real.onEvidence('BASELINE_SUMMARY_REVIEWED'); return; }
 		summaryApproved = checked;
+	}
+
+	function confirmReturnToService(checked: boolean) {
+		if (real) { if (checked) real.onEvidence('RETURN_TO_SERVICE_CONFIRMATION'); return; }
+		returnToServiceApproved = checked;
 	}
 
 	function confirmChargerIsolated(checked: boolean) {
@@ -819,6 +935,39 @@
 
 	$effect(() => {
 		if (!real) return;
+		const eventChanged = manualMeasurementEventId !== real.event.calibrationEventId;
+		const noLoadRipple = real.evidence.filter((item) => item.evidenceType === 'RIPPLE_BEFORE_LOAD'
+			&& item.numericValue != null).at(-1) ?? null;
+		const withLoadRipple = real.evidence.filter((item) => item.evidenceType === 'RIPPLE_AFTER_LOAD'
+			&& item.numericValue != null).at(-1) ?? null;
+		if (eventChanged) {
+			manualMeasurementEventId = real.event.calibrationEventId;
+			rippleNoLoad = noLoadRipple?.numericValue == null ? '' : String(noLoadRipple.numericValue);
+			rippleWithLoad = withLoadRipple?.numericValue == null ? '' : String(withLoadRipple.numericValue);
+			rippleNoLoadDirty = false;
+			rippleWithLoadDirty = false;
+			rippleNoLoadSubmissionPending = false;
+			rippleWithLoadSubmissionPending = false;
+			rippleNoLoadEvidenceId = noLoadRipple?.evidenceId ?? null;
+			rippleWithLoadEvidenceId = withLoadRipple?.evidenceId ?? null;
+		} else {
+			const nextNoLoadEvidenceId = noLoadRipple?.evidenceId ?? null;
+			if (nextNoLoadEvidenceId !== rippleNoLoadEvidenceId
+					&& ((!rippleNoLoadDirty && !rippleNoLoadFocused) || rippleNoLoadSubmissionPending)) {
+				rippleNoLoad = noLoadRipple?.numericValue == null ? '' : String(noLoadRipple.numericValue);
+				rippleNoLoadDirty = false;
+				rippleNoLoadSubmissionPending = false;
+				rippleNoLoadEvidenceId = nextNoLoadEvidenceId;
+			}
+			const nextWithLoadEvidenceId = withLoadRipple?.evidenceId ?? null;
+			if (nextWithLoadEvidenceId !== rippleWithLoadEvidenceId
+					&& ((!rippleWithLoadDirty && !rippleWithLoadFocused) || rippleWithLoadSubmissionPending)) {
+				rippleWithLoad = withLoadRipple?.numericValue == null ? '' : String(withLoadRipple.numericValue);
+				rippleWithLoadDirty = false;
+				rippleWithLoadSubmissionPending = false;
+				rippleWithLoadEvidenceId = nextWithLoadEvidenceId;
+			}
+		}
 		if (navigationEventId !== real.event.calibrationEventId) {
 			selectedIndex = initialBaselineStep(real.event);
 			navigationEventId = real.event.calibrationEventId;
@@ -845,15 +994,12 @@
 		dischargeScheduled = initialBaselineProcess(real, 'CONTROLLED_DISCHARGE')?.state !== 'NOT_STARTED';
 		dischargeResultRecorded = hasInitialBaselineEvidence(real, 'DISCHARGE_CUTOFF_REVIEWED');
 		summaryApproved = hasInitialBaselineEvidence(real, 'BASELINE_SUMMARY_REVIEWED');
+		returnToServiceApproved = hasInitialBaselineEvidence(real, 'RETURN_TO_SERVICE_CONFIRMATION');
 		floatCurrent = realFloatSample?.domainCurrentA == null ? '—' : (Math.abs(realFloatSample.domainCurrentA) * 1000).toFixed(1);
 		midpointVoltage = realFloatSample?.midpointVoltageV?.toFixed(3) ?? '—';
 		floatCurrentMeasured = hasInitialBaselineEvidence(real, 'CHARGER_OUTPUT_CURRENT');
 		midpointMeasured = hasInitialBaselineEvidence(real, 'MIDPOINT_VOLTAGE');
 		rippleNoLoadMeasured = hasInitialBaselineEvidence(real, 'RIPPLE_BEFORE_LOAD');
-		const noLoadRipple = real.evidence.filter((item) => item.evidenceType === 'RIPPLE_BEFORE_LOAD' && item.numericValue != null).at(-1);
-		rippleNoLoad = noLoadRipple?.numericValue == null ? '' : String(noLoadRipple.numericValue);
-		const ripple = real.evidence.filter((item) => item.evidenceType === 'RIPPLE_AFTER_LOAD' && item.numericValue != null).at(-1);
-		if (ripple?.numericValue != null) rippleWithLoad = String(ripple.numericValue);
 	});
 
 	onMount(() => {
@@ -948,6 +1094,8 @@
 						{#if boostReached}<label class="charge-confirm"><input type="checkbox" checked={boostConfirmed} onchange={(event) => confirmBoost(event.currentTarget.checked)} /><span><strong>Confirm Vboost reached</strong><small>Measured string voltage has reached the configured target.</small></span></label>{/if}
 						{#if real ? initialFloatProcess?.state !== 'NOT_STARTED' : ticket.boostConfirmedAt !== null}<div class:ready={floatSettled} class="charge-status"><div class="status-head"><div><span>Float charge</span><strong>{floatSettled ? 'Vfloat target reached' : 'Charging and settling to Vfloat'}</strong></div><b>{real ? `${voltageText(displayedFloatVoltage)} V / ${effectiveFloatTargetVoltage.toFixed(1)} V` : `${voltageText(displayedFloatVoltage)} V / ${floatVoltage.toFixed(1)} V`}</b></div>{#if real}<div class="progress float-progress"><i style={`width:${realFloatBarWidth}%`}></i></div><div class="live-charge-metrics"><div><span>Processed string voltage</span><strong>{voltageText(displayedFloatVoltage)} V</strong></div><div><span>Nominal target (25 °C)</span><strong>{floatVoltage.toFixed(1)} V</strong><small>{floatVoltagePerCell.toFixed(3)} V/cell × {cellCount}</small></div><div><span>Effective target</span><strong>{effectiveFloatTargetVoltage.toFixed(1)} V</strong><small>{floatProcessedTemperature === null ? 'Waiting for cell temperature' : `Temperature-compensated at ${floatProcessedTemperature.toFixed(1)} °C`}</small></div></div><p class="live-snapshot-note">The bar is the processed string voltage against the temperature-compensated target. The backend alone confirms the target.</p>{#if initialFloatRuntimeStatus}<div class="process-runtime-warning"><AlertTriangle size={17} /><div><strong>Backend process warning{initialFloatRuntimeStatus.recommendation ? ` · ${initialFloatRuntimeStatus.recommendation}` : ''}</strong>{#each initialFloatRuntimeStatus.blockers as blocker}<span><b>{blocker}</b> — {processBlockerMessage(blocker)}</span>{/each}</div></div>{/if}{:else}<div class="progress float-progress"><i style={`width:${floatSettlingProgress}%`}></i></div>{/if}{#if !floatSettled}<div class="waiting"><i></i> Automatic transition · charger output is regulating to Vfloat</div>{/if}</div>{/if}
 						{#if real ? initialFloatProcess?.state === 'COMPLETED' : ticket.floatStableStartedAt !== null && ticket.floatStableStartedAt !== undefined}<div class:ready={floatReached} class="float-stable"><div class="status-head"><div><span>Float stable mode</span><strong>{floatReached ? 'Stable window complete' : 'Holding within Float range'}</strong></div><b>{floatStableProgress}%</b></div><div class="progress float-progress"><i style={`width:${floatStableProgress}%`}></i></div><div class="float-metrics"><div><span>Current voltage</span><strong>{voltageText(displayedFloatVoltage)} V</strong><small>Target ± {initialFloatVoltageToleranceV.toFixed(1)} V</small></div><div><span>Current charge</span><strong>{currentText(displayedFloatCurrentA)} A</strong><small>{initialFloatCurrentMinA.toFixed(1)}–{initialFloatCurrentMaxA.toFixed(1)} A</small></div><div><span>Stable duration</span><strong>{floatStableElapsedMinutes} / {floatStableDurationMinutes} min</strong><small>{real ? 'Measured by backend worker' : 'Demo time accelerated'}</small></div></div>{#if initialFloatStableWarning}<div class="float-stable-warning"><AlertTriangle size={17} /><div><strong>{initialFloatStableWarning.serverBlocker ? `Server blocker: ${initialFloatStableWarning.serverBlocker}` : 'Float stable window is waiting for readings in range'}</strong><span>{#if !initialFloatStableWarning.voltageAvailable}Live string voltage is unavailable.{:else if !initialFloatStableWarning.voltageInRange}Live voltage {voltageText(displayedFloatVoltage)} V is outside the compensated Vfloat {effectiveFloatTargetVoltage.toFixed(1)} ± {initialFloatVoltageToleranceV.toFixed(1)} V (nominal {floatVoltage.toFixed(1)} V at 25 °C).{/if}{#if !initialFloatStableWarning.currentAvailable} Live charge current is unavailable.{:else if !initialFloatStableWarning.currentInRange} Live current magnitude {currentText(initialFloatStableWarning.currentMagnitude)} A is outside the configured {initialFloatCurrentMinA.toFixed(2)}–{initialFloatCurrentMaxA.toFixed(2)} A range.{/if}</span><small>{initialFloatStableWarning.serverBlocker ? 'The server reported this blocker; correct the live condition and wait for the next readback.' : 'This explanation is derived from live telemetry and the event configuration; the backend remains authoritative.'}</small></div></div>{/if}</div>{/if}
+						{#if canChangeInitialFloatRange}<button class="secondary" onclick={() => initialFloatPolicyEditor = !initialFloatPolicyEditor}>Change Float-current range</button>{/if}
+						{#if initialFloatPolicyEditor && canChangeInitialFloatRange}<section class="runtime-policy-editor"><strong>Change active Float-current range</strong><span>Saving restarts the stable observation window from zero. The process attempt remains active.</span><div><label>Minimum (A)<input type="number" min="0" step="0.01" bind:value={floatCurrentMinInput} /></label><label>Maximum (A)<input type="number" min="0" step="0.01" bind:value={floatCurrentMaxInput} /></label></div><textarea maxlength="512" placeholder="Required reason" bind:value={initialFloatPolicyReason}></textarea><button class="secondary" disabled={!initialFloatPolicyReason.trim() || !Number.isFinite(Number(floatCurrentMinInput)) || !Number.isFinite(Number(floatCurrentMaxInput)) || Number(floatCurrentMinInput) < 0 || Number(floatCurrentMaxInput) < Number(floatCurrentMinInput) || real?.busy} onclick={submitInitialFloatPolicy}>Apply range and restart stable timer</button></section>{/if}
 						{#if floatReached && boostConfirmed}<label class="charge-confirm"><input type="checkbox" checked={floatConfirmed} onchange={(event) => confirmFloat(event.currentTarget.checked)} /><span><strong>Confirm Float condition is stable</strong><small>Review the voltage, current and completed stable window above.</small></span></label>{/if}
 					{/if}
 				</section>
@@ -1017,8 +1165,9 @@
 		{:else if selectedIndex === 5}
 			<section class="summary-workflow">
 				<div class="summary-heading"><div><span>INITIAL BASELINE EVENT</span><strong>{ticket.id}</strong></div><span>Ready for review</span></div>
-				<div class="summary-grid"><article><span>String voltage</span><strong>{summaryValues.stringVoltage} V</strong><small>Float target</small></article><article><span>Midpoint voltage</span><strong>{summaryValues.midpointVoltage} V</strong><small>Baseline</small></article><article><span>Discharged capacity</span><strong>{summaryValues.dischargedCapacity} Ah</strong><small>At cut-off</small></article><article><span>Initial SOH</span><strong>{summaryValues.initialSoh}%</strong><small>From discharge test</small></article><article><span>Lowest cell voltage</span><strong>{summaryValues.lowestCellVoltage} V</strong><small>{summaryValues.stopReason.replaceAll('_', ' ')}</small></article><article><span>Float current</span><strong>{summaryValues.floatCurrent} mA</strong><small>Baseline</small></article><article><span>Cell / block resistance</span><strong>{summaryValues.internalResistance} mΩ</strong><small>Baseline</small></article><article><span>Temperature condition</span><strong>{summaryValues.ambientTemperature} °C</strong><small>Δ {summaryValues.temperatureDelta} °C / ≤ {summaryValues.allowedTemperatureDelta} °C</small></article><article><span>AC ripple</span><strong>{summaryValues.rippleNoLoad} / {summaryValues.rippleWithLoad} V</strong><small>No load / with load</small></article></div>
+				<div class="summary-grid"><article><span>String voltage</span><strong>{summaryValues.stringVoltage} V</strong><small>Float target</small></article><article><span>Midpoint voltage</span><strong>{summaryValues.midpointVoltage} V</strong><small>Baseline</small></article><article><span>Discharged capacity</span><strong>{summaryValues.dischargedCapacity} Ah</strong><small>At cut-off</small></article><article><span>Initial SOH</span><strong>{summaryValues.initialSoh}%</strong><small>From discharge test</small></article><article><span>Lowest cell voltage</span><strong>{summaryValues.lowestCellVoltage} V</strong><small>{summaryValues.stopReason.replaceAll('_', ' ')}</small></article><article><span>Float current</span><strong>{summaryValues.floatCurrent} mA</strong><small>Baseline</small></article><article><span>Cell / block resistance</span><strong>{summaryValues.internalResistance} µΩ</strong><small>Baseline</small></article><article><span>Temperature condition</span><strong>{summaryValues.ambientTemperature} °C</strong><small>Δ {summaryValues.temperatureDelta} °C / ≤ {summaryValues.allowedTemperatureDelta} °C</small></article><article><span>AC ripple</span><strong>{summaryValues.rippleNoLoad} / {summaryValues.rippleWithLoad} V</strong><small>No load / with load</small></article></div>
 				{#if !readOnly}<label class="charge-confirm summary-confirm"><input type="checkbox" checked={summaryApproved} onchange={(event) => confirmSummary(event.currentTarget.checked)} /><span><strong>Confirm Initial Baseline summary</strong><small>I have reviewed the event results and accept this data as the Initial Baseline reference.</small></span></label>{/if}
+				{#if !readOnly}<label class="charge-confirm summary-confirm"><input type="checkbox" checked={returnToServiceApproved} onchange={(event) => confirmReturnToService(event.currentTarget.checked)} /><span><strong>Confirm return to service</strong><small>The battery string is ready to return to normal operation.</small></span></label>{/if}
 			</section>
 		{:else}
 			{#if selectedIndex === 0 && real}
@@ -1039,6 +1188,7 @@
 </section>
 
 <style>
+	.runtime-policy-editor{display:grid;gap:10px;padding:14px;border:1px solid #d8e2ef;border-radius:10px;background:#f7f9fc;color:#40516d}.runtime-policy-editor>span{font-size:12px;color:#7b899d}.runtime-policy-editor>div{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.runtime-policy-editor label{display:grid;gap:5px;font-size:11px}.runtime-policy-editor input,.runtime-policy-editor textarea{min-height:37px;padding:8px;border:1px solid #d7dfeb;border-radius:7px;background:#fff;font:inherit}.runtime-policy-editor textarea{min-height:68px;resize:vertical}
 	.baseline-page{width:100%;color:#33425d}.page-head{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:12px}.back-link{display:inline-flex;align-items:center;gap:7px;margin:0 0 12px;padding:0;border:0;color:#4164a8;background:transparent;font:inherit;font-size:13px;cursor:pointer}.back-link:focus-visible,.stepper button:focus-visible,.secondary:focus-visible,.primary:focus-visible{outline:2px solid #1749ad;outline-offset:2px}.eyebrow{display:block;margin-bottom:6px;color:#3860ad;font-size:11px;font-weight:600;letter-spacing:.09em}.page-head h2{margin:0;color:#172b4d;font-size:25px;font-weight:500}.guide-badge{padding:7px 9px;border-radius:7px;color:#4164a8;background:#eef4ff;font-size:11px;font-weight:600;white-space:nowrap}.demo-banner,.complete-banner{display:flex;align-items:center;gap:9px;margin-bottom:16px;padding:11px 13px;border-radius:9px;color:#315e9e;background:#eff6ff;font-size:12px}.complete-banner{margin:16px 0 0;color:#28734b;background:#edf9f1}.stepper{display:grid;grid-template-columns:repeat(6,minmax(132px,1fr));overflow-x:auto;margin-bottom:16px;border:1px solid #edf1f6;border-radius:11px;background:#fff;box-shadow:0 5px 18px rgba(35,54,89,.025)}.stepper button{display:grid;grid-template-columns:25px 1fr;align-items:center;gap:7px;min-width:132px;padding:12px 10px;border:0;border-right:1px solid #edf0f5;color:#718096;background:#fff;font:inherit;text-align:left;cursor:pointer}.stepper button:last-child{border-right:0}.stepper button span{display:grid;width:23px;height:23px;place-items:center;border:1px solid #d7dfeb;border-radius:50%;font-size:11px}.stepper button strong{font-size:11px;font-weight:500;line-height:1.2}.stepper button.active{color:#1749ad;background:#f2f6ff}.stepper button.active span{border-color:#1749ad;color:#fff;background:#1749ad}.workspace-panel{min-inline-size:0;margin:0;padding:22px;border:1px solid #edf1f6;border-radius:12px;background:#fff;box-shadow:0 12px 30px rgba(35,54,89,.055)}.content-heading{display:flex;align-items:center;gap:10px;margin-bottom:18px;color:#315b9f}.content-heading div{display:grid;gap:3px}.content-heading span{color:#7590ba;font-size:10px;font-weight:600;letter-spacing:.08em}.content-heading h3{margin:0;color:#273853;font-size:18px;font-weight:500}.action-card{display:grid;gap:6px;padding:15px 16px;border-radius:10px;color:#294f91;background:#f0f5fd}.action-card span{font-size:10px;font-weight:600;letter-spacing:.06em}.action-card strong{font-size:14px;font-weight:500;line-height:1.5}.content-grid{display:grid;grid-template-columns:1.15fr .85fr;gap:12px;margin-top:12px}.content-grid section,.record-card{padding:15px 16px;border-radius:10px;background:#f7f9fc}.content-grid h4,.record-card h4{margin:0 0 11px;color:#40516d;font-size:12px;font-weight:600}.content-grid ul{display:grid;gap:9px;margin:0;padding:0;list-style:none}.content-grid li{color:#52647e;font-size:13px;line-height:1.4}.content-grid li label{display:flex;align-items:flex-start;gap:8px;cursor:pointer}.content-grid li input{width:16px;height:16px;flex:none;margin:1px 0 0;accent-color:#1749ad}.content-grid li :global(svg){flex:none;margin-top:1px;color:#aab5c4}.content-grid li.complete{color:#3d6c55}.content-grid li.complete :global(svg){color:#4f8a6a}.live-card{background:#f5f8fc!important}.live-head{display:flex;align-items:center;justify-content:space-between;gap:8px}.live-head span{padding:4px 6px;border-radius:999px;color:#28734b;background:#e8f7ee;font-size:9px;font-weight:600}.live-metrics{display:grid;gap:7px}.live-metrics div{display:grid;grid-template-columns:1fr auto;gap:2px 8px;padding:8px 0;border-top:1px solid #e6edf5}.live-metrics span{color:#7b899d;font-size:11px}.live-metrics strong{color:#30415d;font-size:13px;font-weight:500}.live-metrics small{grid-column:1/-1;color:#4e8a68;font-size:10px}.record-card{margin-top:12px}.record-list{display:flex;flex-wrap:wrap;gap:7px}.record-list span{padding:6px 8px;border-radius:6px;color:#526b95;background:#edf3fb;font-size:11px}.page-footer,.footer-navigation,.footer-actions{display:flex;gap:10px}.page-footer{justify-content:space-between;margin-top:16px}.primary,.secondary{display:inline-flex;align-items:center;justify-content:center;min-height:39px;padding:0 14px;border-radius:8px;font:inherit;font-size:14px;font-weight:500;cursor:pointer}.primary{border:0;color:#fff;background:#1749ad}.secondary{border:0;color:#40516f;background:#f4f7fb}.primary:disabled,.secondary:disabled{opacity:.55;cursor:not-allowed}.secondary:hover:not(:disabled){background:#eaf0f8}@media(max-width:1100px){.stepper{grid-template-columns:repeat(6,150px)}}@media(max-width:650px){.page-head{flex-direction:column}.guide-badge{align-self:flex-start}.workspace-panel{padding:16px}.content-grid{grid-template-columns:1fr}.page-footer{gap:10px;flex-direction:column}.footer-navigation,.footer-actions{width:100%}.page-footer button{flex:1}}
 	.charge-workflow{display:grid;gap:11px}.charge-targets{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.charge-targets div{display:grid;gap:5px;padding:13px 14px;border-radius:9px;background:#f5f8fc}.charge-targets span,.charge-status span{color:#718096;font-size:11px}.charge-targets strong{color:#30415d;font-size:16px;font-weight:500}.charge-targets small{color:#7b899d;font-size:10px}.charge-confirm{display:flex;align-items:flex-start;gap:10px;padding:13px 14px;border-radius:9px;color:#52647e;background:#f7f9fc;cursor:pointer}.charge-confirm input{width:17px;height:17px;flex:none;margin:1px 0 0;accent-color:#1749ad}.charge-confirm span{display:grid;gap:3px}.charge-confirm strong{color:#40516d;font-size:13px;font-weight:500}.charge-confirm small{color:#7b899d;font-size:11px;line-height:1.4}.charge-status{display:grid;gap:10px;padding:14px;border-radius:9px;background:#f0f5fd}.charge-status.ready{background:#edf9f1}.status-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.status-head div{display:grid;gap:3px}.status-head strong{color:#294f91;font-size:14px;font-weight:500}.charge-status.ready .status-head strong,.charge-status.ready .status-head b{color:#28734b}.status-head b{color:#315b9f;font-size:13px;font-weight:500}.live-charge-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.live-charge-metrics div{display:grid;gap:3px;padding:9px 10px;border-radius:7px;background:rgba(255,255,255,.6)}.live-charge-metrics span{color:#718096;font-size:10px}.live-charge-metrics strong{color:#294f91;font-size:14px;font-weight:500}.live-charge-metrics small{color:#718096;font-size:10px}.live-snapshot-note,.estimate-note{margin:0;color:#657994;font-size:11px;line-height:1.4}.estimate-head{padding-top:1px}.progress{height:6px;overflow:hidden;border-radius:99px;background:#dce7f8}.progress i{display:block;height:100%;border-radius:inherit;background:#3267c4;transition:width .2s ease}.charge-status .secondary{justify-self:start;min-height:32px;font-size:12px}.waiting{display:flex;align-items:center;gap:7px;color:#5e7598;font-size:12px}.waiting i{width:8px;height:8px;border-radius:50%;background:#4778ce;animation:pulse 1.1s ease-in-out infinite}@keyframes pulse{50%{opacity:.3;transform:scale(.7)}}@media(max-width:650px){.charge-targets,.live-charge-metrics{grid-template-columns:1fr}.status-head{align-items:flex-start;flex-direction:column;gap:5px}}
 	.progressive-checklist{grid-column:1/-1}.progressive-checklist>p{margin:-3px 0 12px;color:#7b899d;font-size:11px}.progressive-checklist li{display:flex;align-items:flex-start;gap:9px;padding:10px 0;border-top:1px solid #e7edf4}.progressive-checklist .item-number{display:grid;width:20px;height:20px;flex:none;place-items:center;border-radius:50%;color:#5875a3;background:#eaf1fb;font-size:10px;font-weight:600}.progressive-checklist li.complete .item-number{color:#fff;background:#4f8a6a}.progressive-checklist li label{flex:1}

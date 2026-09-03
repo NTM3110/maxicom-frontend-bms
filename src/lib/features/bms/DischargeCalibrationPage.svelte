@@ -12,6 +12,8 @@
 		appendCalibrationEvidence,
 		configureCalibrationDischargeMonitor,
 		configureCalibrationFloatStablePolicy,
+		configureActiveCalibrationFloatCurrentRange,
+		configureActiveCalibrationVocDeadband,
 		configureCalibrationDemoTimeScale,
 		createCalibrationEvent,
 		executeCalibrationStageAction,
@@ -100,6 +102,9 @@
 		onEvidence: recordRealInitialBaselineEvidence, onStartProcess: startRealInitialBaselineProcess,
 		onConfigureDemoTimeScale: configureRealInitialBaselineDemoTimeScale,
 		onConfigureFloatStablePolicy: configureRealInitialBaselineFloatStablePolicy,
+		onConfigureActiveFloatRange: configureRealInitialBaselineActiveFloatRange,
+		onConfigureActiveVocDeadband: configureRealInitialBaselineActiveVocDeadband,
+		onConfirmRecoveryLoadConnected: confirmRealInitialBaselineRecoveryLoadConnected,
 		onConfigureDischargeMonitor: configureRealInitialBaselineDischargeMonitor,
 		onLoadCurvePoints: loadRealInitialBaselineCurvePoints,
 		onStartControlledDischarge: startRealInitialBaselineControlledDischarge,
@@ -566,12 +571,52 @@
 	function mapRealInitialBaselineTicket(detail: CalibrationEventDetail, evidence: CalibrationManualEvidence[], samples: CalibrationSample[]): InitialBaselineDemoTicket {
 		const seed = createInitialBaselineDemoTicket(selectedStringIndex, selectedString?.stringName ?? detail.configuration.stringKey);
 		const has = (type: string) => evidence.some((item) => item.evidenceType === type && ['PASS', 'RECORDED'].includes(item.status));
+		const numericEvidence = (type: string) => evidence.filter((item) => item.evidenceType === type
+			&& item.numericValue != null).at(-1)?.numericValue ?? null;
 		const process = (type: string) => detail.processes.find((item) => item.type === type);
 		const completed = (type: string) => process(type)?.state === 'COMPLETED';
+		const finalSample = (type: string) => {
+			const target = process(type);
+			return target ? samples.filter((item) => item.calibrationProcessId === target.calibrationProcessId
+				&& item.processAttemptNumber === target.attemptNumber && item.persistenceReason === 'FINAL_SNAPSHOT')
+				.sort((a, b) => a.sampleId - b.sampleId).at(-1) ?? null : null;
+		};
 		const vocProcess = process('VOC_BASELINE_CAPTURE');
-		const voc = vocProcess?.state === 'COMPLETED' ? samples.filter((item) => item.calibrationProcessId === vocProcess.calibrationProcessId
-			&& item.processAttemptNumber === vocProcess.attemptNumber && item.persistenceReason === 'FINAL_SNAPSHOT').sort((a, b) => a.sampleId - b.sampleId).at(-1) : null;
+		const voc = vocProcess?.state === 'COMPLETED' ? finalSample('VOC_BASELINE_CAPTURE') : null;
+		const dischargeProcess = process('CONTROLLED_DISCHARGE');
+		const dischargeSamples = dischargeProcess ? samples.filter((item) => item.calibrationProcessId === dischargeProcess.calibrationProcessId
+			&& item.processAttemptNumber === dischargeProcess.attemptNumber).sort((a, b) => a.sampleId - b.sampleId) : [];
+		const cutoffSample = dischargeSamples.filter((item) => item.persistenceReason === 'CUTOFF' && item.quality === 'VALID').at(-1)
+			?? dischargeSamples.at(-1) ?? null;
+		const recoveryFloat = finalSample('RECOVERY_FLOAT_STABILIZATION');
+		const cooldown = finalSample('COOL_DOWN_TO_AMBIENT');
+		const ratedCapacityAh = typeof detail.configuration.ratedCapacityAh === 'number' ? detail.configuration.ratedCapacityAh : null;
+		const allCellsEndpointAh = dischargeProcess?.dischargeRuntime?.allCellsEndpointAh ?? cutoffSample?.rawUsedAh ?? null;
+		const lowestCellVoltageV = cutoffSample?.cells.map((cell) => cell.voltageV)
+			.filter((value): value is number => value != null && Number.isFinite(value)).reduce<number | null>(
+				(lowest, value) => lowest == null || value < lowest ? value : lowest, null) ?? null;
+		const resistanceValues = recoveryFloat?.cells.map((cell) => cell.resistanceUohm)
+			.filter((value): value is number => value != null && Number.isFinite(value)) ?? [];
+		const averageResistanceUohm = resistanceValues.length
+			? resistanceValues.reduce((total, value) => total + value, 0) / resistanceValues.length : null;
+		const ambientTemperatureC = cooldown?.ambientTemperatureC ?? null;
+		const cooldownCellTemperatures = cooldown?.cells.map((cell) => cell.temperatureC)
+			.filter((value): value is number => value != null && Number.isFinite(value)) ?? [];
+		const cooldownDeltaC = ambientTemperatureC == null || !cooldownCellTemperatures.length ? null
+			: Math.max(...cooldownCellTemperatures.map((value) => Math.abs(value - ambientTemperatureC)));
+		const cellCount = typeof detail.configuration.cellCount === 'number' ? detail.configuration.cellCount : null;
+		const floatVoltagePerCell = typeof detail.configuration.floatVoltagePerCell === 'number'
+			? detail.configuration.floatVoltagePerCell : null;
+		const floatTargetVoltageV = cellCount != null && floatVoltagePerCell != null ? cellCount * floatVoltagePerCell : null;
+		const allowedTemperatureDeltaC = typeof detail.configuration.cooldownAllowedTemperatureDeltaC === 'number'
+			? detail.configuration.cooldownAllowedTemperatureDeltaC : 0.3;
+		const midpointVoltageV = numericEvidence('MIDPOINT_VOLTAGE') ?? recoveryFloat?.midpointVoltageV ?? null;
+		const floatCurrentMa = recoveryFloat?.domainCurrentA == null ? null : Math.abs(recoveryFloat.domainCurrentA) * 1000;
+		const initialSohPct = allCellsEndpointAh == null || ratedCapacityAh == null || ratedCapacityAh <= 0 ? null
+			: Math.min(100, allCellsEndpointAh * 100 / ratedCapacityAh);
+		const display = (value: number | null, digits: number) => value == null || !Number.isFinite(value) ? '—' : value.toFixed(digits);
 		const ripple = evidence.filter((item) => item.evidenceType === 'RIPPLE_AFTER_LOAD' && item.numericValue != null).at(-1)?.numericValue;
+		const rippleNoLoad = numericEvidence('RIPPLE_BEFORE_LOAD');
 		return {
 			...seed, id: `#${detail.calibrationEventId}`, currentStep: initialBaselineStep(detail),
 			status: detail.closedAt ? 'COMPLETED' : 'IN_PROGRESS', completedAt: detail.closedAt ? Date.parse(detail.closedAt) : null,
@@ -589,12 +634,25 @@
 			recoveryFloatStartedAt: process('RECOVERY_FLOAT_STABILIZATION')?.state === 'NOT_STARTED' ? null : 1,
 			recoveryFloatStableStartedAt: process('RECOVERY_FLOAT_STABILIZATION')?.state === 'NOT_STARTED' ? null : 1,
 			recoveryFloatConfirmed: has('RECOVERY_FLOAT_STABILITY_REVIEWED'), resistanceMeasured: has('CELL_RESISTANCE_SAMPLE_REVIEWED'),
-			loadConnectedForRipple: has('LOAD_CONNECTED_CONFIRMATION'), rippleWithLoad: ripple == null ? '' : String(ripple),
+			floatCurrent: floatCurrentMa == null ? '' : String(floatCurrentMa),
+			floatCurrentMeasured: has('FLOAT_CURRENT_REVIEWED'), midpointVoltage: midpointVoltageV == null ? '' : String(midpointVoltageV),
+			midpointMeasured: has('MIDPOINT_VOLTAGE'), rippleNoLoad: rippleNoLoad == null ? '' : String(rippleNoLoad),
+			rippleNoLoadMeasured: has('RIPPLE_BEFORE_LOAD'), loadConnectedForRipple: has('LOAD_CONNECTED_CONFIRMATION'), rippleWithLoad: ripple == null ? '' : String(ripple),
 			rippleWithLoadMeasured: has('RIPPLE_AFTER_LOAD'), chargerOpenedForVoc: has('CHARGER_MCB_OPEN_CONFIRMATION'),
 			vocCaptureStartedAt: voc?.measurementTime ? Date.parse(voc.measurementTime) : null,
 			vocSnapshot: voc ? { capturedAt: Date.parse(voc.measurementTime ?? voc.createdAt ?? '') || Date.now(), stringVoltageV: voc.stringVoltageV ?? 0,
 				cells: voc.cells.map((cell) => ({ cellId: cell.cellIndex, voltageV: cell.voltageV ?? 0 })) } : null,
-			vocBaselineConfirmed: has('VOC_BASELINE_CONFIRMATION')
+			vocBaselineConfirmed: has('VOC_BASELINE_CONFIRMATION'),
+			summary: {
+				stringVoltage: display(floatTargetVoltageV, 1), midpointVoltage: display(midpointVoltageV, 3),
+				dischargedCapacity: display(allCellsEndpointAh, 3), initialSoh: display(initialSohPct, 1),
+				lowestCellVoltage: display(lowestCellVoltageV, 3),
+				stopReason: dischargeProcess?.state === 'COMPLETED' && allCellsEndpointAh != null ? 'CELL_CUTOFF' : '—',
+				floatCurrent: display(floatCurrentMa, 1), internalResistance: display(averageResistanceUohm, 2),
+				ambientTemperature: display(ambientTemperatureC, 1), temperatureDelta: display(cooldownDeltaC, 1),
+				allowedTemperatureDelta: display(allowedTemperatureDeltaC, 1),
+				rippleNoLoad: display(rippleNoLoad, 3), rippleWithLoad: display(ripple ?? null, 3)
+			}
 		};
 	}
 
@@ -615,6 +673,48 @@
 			await syncInitialBaselineReadback(updated);
 		} catch (cause) { await recoverAfterMutationFailure(cause, previous); }
 		finally { mutating = false; }
+	}
+
+	async function confirmRealInitialBaselineRecoveryLoadConnected() {
+		if (!event || !currentStage || event.eventType !== 'INITIAL_BASELINE' || mutating) return;
+		const previous = event;
+		mutating = true;
+		error = '';
+		notice = '';
+		try {
+			let detail = event;
+			let stage = currentStage;
+			if (stage.type === 'POST_RECHARGE_FLOAT') {
+				const complete = detail.allowedActions.find((action) => action.actionCode === 'COMPLETE_STAGE');
+				if (!complete?.enabled) {
+					throw new Error(complete?.disabledReason
+						?? 'Finish and save all no-load measurements before confirming the operating load.');
+				}
+				detail = await executeCalibrationStageAction(detail.calibrationEventId, stage.calibrationStageId,
+					complete.actionCode, detail.eventVersion, '', []);
+				applyEvent(detail, false, false);
+				await syncInitialBaselineReadback(detail);
+				stage = detail.stages.find((item) => item.calibrationStageId === detail.currentStageId) ?? stage;
+			}
+			if (stage.type !== 'BASELINE_CAPTURE') {
+				throw new Error(`Load confirmation is available only in BASELINE_CAPTURE; backend current stage is ${stage.type}.`);
+			}
+			const updated = await appendCalibrationEvidence({
+				calibrationEventId: detail.calibrationEventId,
+				calibrationStageId: stage.calibrationStageId,
+				expectedEventVersion: detail.eventVersion,
+				evidenceType: 'LOAD_CONNECTED_CONFIRMATION',
+				status: 'PASS',
+				textValue: 'Confirmed'
+			});
+			applyEvent(updated, false, false);
+			await syncInitialBaselineReadback(updated);
+			notice = `LOAD_CONNECTED_CONFIRMATION was saved at event version ${updated.eventVersion}.`;
+		} catch (cause) {
+			await recoverAfterMutationFailure(cause, previous);
+		} finally {
+			mutating = false;
+		}
 	}
 
 	async function configureRealInitialBaselineDemoTimeScale(factor: 1 | 60) {
@@ -653,6 +753,39 @@
 				floatCurrentMaxA: policy.currentMaxA
 			}));
 		} catch (cause) { await recoverAfterMutationFailure(cause, previous); }
+		finally { mutating = false; }
+	}
+
+	async function configureRealInitialBaselineActiveFloatRange(processType: 'FLOAT_SETTLEMENT_TO_VFLOAT' | 'RECOVERY_FLOAT_STABILIZATION', currentMinA: number, currentMaxA: number, reason: string) {
+		if (!event || !currentStage || mutating || !reason.trim()) return;
+		const active = event.processes.find((item) => item.type === processType
+			&& item.calibrationStageId === currentStage?.calibrationStageId && item.state === 'ACTIVE');
+		if (!active) return;
+		const previous = event; mutating = true; error = '';
+		try {
+			applyEvent(await configureActiveCalibrationFloatCurrentRange({
+				calibrationEventId: event.calibrationEventId, calibrationStageId: currentStage.calibrationStageId,
+				calibrationProcessId: active.calibrationProcessId, processAttemptNumber: active.attemptNumber,
+				expectedEventVersion: event.eventVersion, floatCurrentMinA: currentMinA,
+				floatCurrentMaxA: currentMaxA, reason
+			}));
+		} catch (cause) { await recoverAfterMutationFailure(cause, previous); throw cause; }
+		finally { mutating = false; }
+	}
+
+	async function configureRealInitialBaselineActiveVocDeadband(deadbandA: number, reason: string) {
+		if (!event || !currentStage || mutating || !reason.trim()) return;
+		const active = event.processes.find((item) => item.type === 'VOC_BASELINE_CAPTURE'
+			&& item.calibrationStageId === currentStage?.calibrationStageId && item.state === 'ACTIVE');
+		if (!active) return;
+		const previous = event; mutating = true; error = '';
+		try {
+			applyEvent(await configureActiveCalibrationVocDeadband({
+				calibrationEventId: event.calibrationEventId, calibrationStageId: currentStage.calibrationStageId,
+				calibrationProcessId: active.calibrationProcessId, processAttemptNumber: active.attemptNumber,
+				expectedEventVersion: event.eventVersion, vocCurrentDeadbandA: deadbandA, reason
+			}));
+		} catch (cause) { await recoverAfterMutationFailure(cause, previous); throw cause; }
 		finally { mutating = false; }
 	}
 
@@ -755,7 +888,7 @@
 	}
 	function continueRealInitialBaseline() {
 		const action = event?.allowedActions.find((item) => item.actionCode === 'COMPLETE_STAGE');
-		if (action) void executeAction(action);
+		if (action) void executeRealInitialBaselineAction(action, '', []);
 	}
 
 	async function executeRealInitialBaselineAction(action: CalibrationAllowedAction, reason: string, acknowledged: string[]) {
