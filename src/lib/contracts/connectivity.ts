@@ -94,8 +94,19 @@ export type BmsNetworkForm = {
 	subnetMask: string;
 	gateway: string;
 	dns: string;
-	mode: string;
+	mode: BmsNetworkMode;
 };
+
+export type BmsNetworkMode = 'DHCP' | 'STATIC' | 'UNKNOWN';
+
+export function normalizeBmsNetworkMode(value: unknown): BmsNetworkMode {
+	if (typeof value !== 'string') return 'UNKNOWN';
+	switch (value.trim().toUpperCase()) {
+		case 'DHCP': return 'DHCP';
+		case 'STATIC': return 'STATIC';
+		default: return 'UNKNOWN';
+	}
+}
 
 export type RtsEthernetForm = {
 	isDhcp: boolean;
@@ -122,12 +133,15 @@ export const RTS_CARRIERS = [
 ];
 
 export function buildBmsNetworkUpdateParams(form: BmsNetworkForm) {
+	if (form.mode === 'UNKNOWN') throw new Error('Select Automatic or Manual address assignment before saving.');
 	return {
 		id: form.id,
 		ipAddress: form.ipAddress ?? '',
 		subnetMask: form.subnetMask ?? '',
 		gateway: form.gateway ?? '',
 		dns: form.dns ?? '',
-		mode: form.mode ?? ''
+		mode: form.mode
 	};
 }
+
+export type BmsNetworkUpdateParams = ReturnType<typeof buildBmsNetworkUpdateParams>;

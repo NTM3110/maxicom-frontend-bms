@@ -2,8 +2,8 @@
 	import { onDestroy } from 'svelte';
 	import * as echarts from 'echarts';
 
-	type TrendPoint = { label: string; voltageV: number; usedAh: number };
-	let { demo = false, cutoffPerCell = 1.8, progress = 100 }: { demo?: boolean; cutoffPerCell?: number; progress?: number } = $props();
+	export type TrendPoint = { label: string; voltageV: number; usedAh: number };
+	let { demo = false, cutoffPerCell = 1.8, progress = 100, values = [] }: { demo?: boolean; cutoffPerCell?: number; progress?: number; values?: TrendPoint[] } = $props();
 	let chartElement: HTMLDivElement;
 	let chart: echarts.ECharts | null = null;
 	let observer: ResizeObserver | null = null;
@@ -15,7 +15,7 @@
 		{ label: '08:00', voltageV: 1.94, usedAh: 157.4 },
 		{ label: '10:00', voltageV: cutoffPerCell, usedAh: 196.8 }
 	]);
-	let points = $derived<TrendPoint[]>(demo ? demoPoints.slice(0, Math.max(1, Math.ceil((Math.max(0, Math.min(100, progress)) / 100) * (demoPoints.length - 1)) + 1)) : []);
+	let points = $derived<TrendPoint[]>(demo ? demoPoints.slice(0, Math.max(1, Math.ceil((Math.max(0, Math.min(100, progress)) / 100) * (demoPoints.length - 1)) + 1)) : values);
 
 	function renderChart(values: TrendPoint[]) {
 		if (!chartElement) return;
@@ -46,8 +46,8 @@
 </script>
 
 	<section class="trend-chart">
-	<header><div><h3>Discharge trend</h3><p>{demo ? progress < 100 ? 'Simulated samples are arriving while the discharge is running.' : 'Simulated discharge profile — voltage falls while discharged capacity rises.' : 'Waiting for BMS discharge samples.'}</p></div>{#if demo}<span>{progress < 100 ? 'RUNNING / DEMO' : 'DEMO DATA'}</span>{/if}</header>
-	<div class="chart-wrap"><div bind:this={chartElement} class="chart" aria-label="Discharge voltage and capacity trend"></div>{#if !demo}<div class="empty"><strong>No samples yet</strong><span>The trend will appear once the BMS event returns samples.</span></div>{/if}</div>
+	<header><div><h3>Discharge trend</h3><p>{demo ? progress < 100 ? 'Simulated samples are arriving while the discharge is running.' : 'Simulated discharge profile — voltage falls while discharged capacity rises.' : values.length ? 'Persisted BMS samples for the current discharge attempt.' : 'Waiting for BMS discharge samples.'}</p></div>{#if demo}<span>{progress < 100 ? 'RUNNING / DEMO' : 'DEMO DATA'}</span>{/if}</header>
+	<div class="chart-wrap"><div bind:this={chartElement} class="chart" aria-label="Discharge voltage and capacity trend"></div>{#if !demo && !values.length}<div class="empty"><strong>No samples yet</strong><span>The trend will appear once the BMS event returns samples.</span></div>{/if}</div>
 </section>
 
 <style>

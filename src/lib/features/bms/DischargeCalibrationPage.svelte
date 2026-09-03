@@ -10,7 +10,10 @@
 	import { formatCalibrationTime } from '$lib/services/calibration-time';
 	import {
 		appendCalibrationEvidence,
+		configureCalibrationDischargeMonitor,
 		configureCalibrationFloatStablePolicy,
+		configureActiveCalibrationFloatCurrentRange,
+		configureActiveCalibrationVocDeadband,
 		configureCalibrationDemoTimeScale,
 		createCalibrationEvent,
 		executeCalibrationStageAction,
@@ -20,18 +23,20 @@
 		listBmsStrings,
 		listCalibrationEvents,
 		loadCalibrationHistory,
+		loadCalibrationCurvePoints,
 		loadCalibrationSamples,
 		monthlyInspectionAssessment,
 		redoCalibrationStage,
 		startCalibrationEvent,
 		startCalibrationProcess,
 		completeCalibrationProcess,
+		confirmCalibrationDischargeStopped,
 		type BatteryString,
 		type BmsStringTelemetry,
 		type CalibrationAllowedAction,
 		type CalibrationEventDetail,
 		type CalibrationEventSummary,
-		type CalibrationStage, type CalibrationManualEvidence, type CalibrationSample,
+		type CalibrationStage, type CalibrationCurvePointPage, type CalibrationManualEvidence, type CalibrationSample,
 		type DischargeCurrentDirection
 	} from '$lib/services/bms-api';
 	let { initialStringIndex = 0, initialEventId = 0 }: { initialStringIndex?: number; initialEventId?: number } = $props();
@@ -45,6 +50,13 @@
 	let liveTelemetry = $state<BmsStringTelemetry | null>(null);
 	let initialBaselineEvidence = $state<CalibrationManualEvidence[]>([]);
 	let initialBaselineSamples = $state<CalibrationSample[]>([]);
+	let initialBaselineCurvePointPage = $state<CalibrationCurvePointPage | null>(null);
+	let initialBaselineCurvePointsLoading = $state(false);
+	let initialBaselineCurveRequestId = 0;
+	let eventDetailRequestId = 0;
+	let appliedEventDetailRequestId = 0;
+	let initialBaselineReadbackRequestId = 0;
+	let appliedInitialBaselineReadbackRequestId = 0;
 	let cellVoltagesExpanded = $state(false);
 	let loading = $state(true);
 	let mutating = $state(false);
@@ -74,18 +86,32 @@
 	let canRedoViewedStage = $derived(!!event && !!viewedStage && !!currentStage && !event.closedAt
 		&& ['ACTIVE', 'BLOCKED', 'REVALIDATION_REQUIRED'].includes(event.status)
 		&& viewedStage.state === 'COMPLETED' && viewedStage.order < currentStage.order);
+	let safetyStoppedCurrentStage = $derived(event?.eventType === 'INITIAL_BASELINE' && currentStage?.type === 'DISCHARGE'
+		&& event.processes.some((process) => process.calibrationStageId === currentStage?.calibrationStageId
+			&& process.type === 'CONTROLLED_DISCHARGE' && process.dischargeRuntime?.safetyState === 'STOP_CONFIRMED')
+		? currentStage : null);
 	let initialBaselineRedoStage = $derived(event?.eventType === 'INITIAL_BASELINE' && currentStage
-		? event.stages.filter((stage) => stage.state === 'COMPLETED' && stage.order < currentStage.order).at(-1) ?? null
+		? safetyStoppedCurrentStage ?? event.stages.filter((stage) => stage.state === 'COMPLETED' && stage.order < currentStage.order).at(-1) ?? null
 		: null);
 	let canRedoInitialBaselineStage = $derived(!!event && !!currentStage && !!initialBaselineRedoStage && !event.closedAt
 		&& ['ACTIVE', 'BLOCKED', 'REVALIDATION_REQUIRED'].includes(event.status));
 	let realInitialBaselineTicket = $derived(event?.eventType === 'INITIAL_BASELINE' ? mapRealInitialBaselineTicket(event, initialBaselineEvidence, initialBaselineSamples) : null);
 	let realInitialBaselineAdapter = $derived<InitialBaselineRealAdapter | null>(event?.eventType === 'INITIAL_BASELINE' ? {
-		event, evidence: initialBaselineEvidence, samples: initialBaselineSamples, telemetry: liveTelemetry, busy: loading || mutating,
+		event, evidence: initialBaselineEvidence, samples: initialBaselineSamples, telemetry: liveTelemetry,
+		curvePointPage: initialBaselineCurvePointPage, curvePointsLoading: initialBaselineCurvePointsLoading,
+		busy: loading || mutating,
 		onEvidence: recordRealInitialBaselineEvidence, onStartProcess: startRealInitialBaselineProcess,
 		onConfigureDemoTimeScale: configureRealInitialBaselineDemoTimeScale,
 		onConfigureFloatStablePolicy: configureRealInitialBaselineFloatStablePolicy,
-		onCompleteProcess: completeRealInitialBaselineProcess, onContinue: continueRealInitialBaseline,
+		onConfigureActiveFloatRange: configureRealInitialBaselineActiveFloatRange,
+		onConfigureActiveVocDeadband: configureRealInitialBaselineActiveVocDeadband,
+		onConfirmRecoveryLoadConnected: confirmRealInitialBaselineRecoveryLoadConnected,
+		onConfigureDischargeMonitor: configureRealInitialBaselineDischargeMonitor,
+		onLoadCurvePoints: loadRealInitialBaselineCurvePoints,
+		onStartControlledDischarge: startRealInitialBaselineControlledDischarge,
+		onCompleteProcess: completeRealInitialBaselineProcess,
+		onConfirmDischargeStopped: confirmRealInitialBaselineDischargeStopped,
+		onContinue: continueRealInitialBaseline,
 		onExecuteAction: executeRealInitialBaselineAction, onRedoStage: redoRealInitialBaselineStage,
 		canRedoStage: canRedoInitialBaselineStage
 	} : null);
@@ -120,6 +146,7 @@
 		initialBaselineTicket = selectedStringIndex ? loadInitialBaselineDemoTicket(selectedStringIndex) : null;
 		event = null;
 		liveTelemetry = null;
+		initialBaselineCurvePointPage = null;
 		events = [];
 		selectedEventId = 0;
 		viewedStageId = null;
@@ -137,10 +164,13 @@
 			]);
 			const latest = events.find(item => item.calibrationEventId === preferredEventId) ?? events.find(item => ['ACTIVE','BLOCKED','REVALIDATION_REQUIRED'].includes(item.status)) ?? events[0];
 			if (latest) {
+				selectedEventId = latest.calibrationEventId;
+				const request = beginEventDetailRequest(latest.calibrationEventId);
 				const detail = await getCalibrationEvent(latest.calibrationEventId);
-				applyEvent(detail, true);
-				workflowOpen = preferredEventId > 0 && opensStageWorkflow(detail);
-				reportOpen = preferredEventId > 0 && detail.closedAt !== null;
+				if (applyEventDetailReadback(detail, request, true)) {
+					workflowOpen = preferredEventId > 0 && opensStageWorkflow(detail);
+					reportOpen = preferredEventId > 0 && detail.closedAt !== null;
+				}
 			} else {
 				event = null;
 				selectedEventId = 0;
@@ -159,10 +189,13 @@
 		error = '';
 		notice = '';
 		try {
-			const detail = await getCalibrationEvent(selectedEventId);
-			applyEvent(detail, true);
-			workflowOpen = opensStageWorkflow(detail);
-			reportOpen = detail.closedAt !== null;
+			const eventId = selectedEventId;
+			const request = beginEventDetailRequest(eventId);
+			const detail = await getCalibrationEvent(eventId);
+			if (applyEventDetailReadback(detail, request, true)) {
+				workflowOpen = opensStageWorkflow(detail);
+				reportOpen = detail.closedAt !== null;
+			}
 		} catch (cause) {
 			selectedEventId = event?.calibrationEventId ?? 0;
 			error = message(cause);
@@ -171,9 +204,11 @@
 		}
 	}
 
-	function applyEvent(detail: CalibrationEventDetail, resetViewedStage = false) {
+	function applyEvent(detail: CalibrationEventDetail, resetViewedStage = false, syncReadback = true) {
 		const previousCurrentStageId = event?.currentStageId ?? null;
 		const wasViewingCurrentStage = viewedStageId === null || viewedStageId === previousCurrentStageId;
+		const previousCurveVersionId = event?.referenceCurve?.curveVersionId ?? null;
+		const curveVersionId = detail.referenceCurve?.curveVersionId ?? null;
 		event = detail;
 		selectedEventId = detail.calibrationEventId;
 		const existing = events.findIndex((item) => item.calibrationEventId === detail.calibrationEventId);
@@ -184,19 +219,81 @@
 		} else if (pendingDangerAction) {
 			pendingDangerAction = detail.allowedActions.find((action) => action.actionCode === pendingDangerAction?.actionCode) ?? null;
 		}
-		if (detail.eventType === 'INITIAL_BASELINE') void syncInitialBaselineReadback(detail);
+		if (detail.eventType === 'INITIAL_BASELINE' && curveVersionId !== previousCurveVersionId) {
+			initialBaselineCurvePointPage = null;
+			if (detail.referenceCurve) void loadRealInitialBaselineCurvePoints(1, 0, 50);
+		}
+		if (syncReadback && detail.eventType === 'INITIAL_BASELINE') void syncInitialBaselineReadback(detail);
+	}
+
+	type EventDetailRequest = {
+		requestId: number;
+		calibrationEventId: number;
+	};
+
+	function beginEventDetailRequest(calibrationEventId: number): EventDetailRequest {
+		return { requestId: ++eventDetailRequestId, calibrationEventId };
+	}
+
+	function applyEventDetailReadback(detail: CalibrationEventDetail, request: EventDetailRequest,
+		resetViewedStage = false) {
+		// Worker checkpoint updates intentionally keep eventVersion and
+		// measurementRevision unchanged. Use the completed-request watermark to
+		// accept those later polls, while still rejecting responses that arrive out
+		// of order. Do not compare with the latest issued request: a slow endpoint
+		// must still be able to complete while a newer poll is in flight.
+		if (detail.calibrationEventId !== request.calibrationEventId
+			|| selectedEventId !== request.calibrationEventId
+			|| request.requestId <= appliedEventDetailRequestId) return false;
+		const current = event;
+		if (current?.calibrationEventId === detail.calibrationEventId
+			&& (detail.eventVersion < current.eventVersion
+				|| (detail.eventVersion === current.eventVersion
+					&& detail.measurementRevision < current.measurementRevision))) return false;
+		appliedEventDetailRequestId = request.requestId;
+		applyEvent(detail, resetViewedStage);
+		return true;
 	}
 
 	async function syncInitialBaselineReadback(detail: CalibrationEventDetail) {
+		const requestId = ++initialBaselineReadbackRequestId;
 		try {
 			const [history, samples] = await Promise.all([
 				loadCalibrationHistory(detail.calibrationEventId), loadCalibrationSamples(detail.calibrationEventId)
 			]);
-			if (event?.calibrationEventId !== detail.calibrationEventId || event.eventVersion !== detail.eventVersion) return;
+			if (requestId <= appliedInitialBaselineReadbackRequestId
+				|| event?.calibrationEventId !== detail.calibrationEventId
+				|| event.eventVersion !== detail.eventVersion
+				|| event.measurementRevision !== detail.measurementRevision) return;
+			appliedInitialBaselineReadbackRequestId = requestId;
 			initialBaselineEvidence = history.evidence;
 			initialBaselineSamples = samples;
 		} catch (cause) {
-			if (event?.calibrationEventId === detail.calibrationEventId) error = message(cause);
+			if (requestId > appliedInitialBaselineReadbackRequestId
+				&& event?.calibrationEventId === detail.calibrationEventId
+				&& event.eventVersion === detail.eventVersion
+				&& event.measurementRevision === detail.measurementRevision) error = message(cause);
+		}
+	}
+
+	async function loadRealInitialBaselineCurvePoints(cellIndex: number, offset: number, limit: number) {
+		if (!event?.referenceCurve || event.eventType !== 'INITIAL_BASELINE') return;
+		const eventId = event.calibrationEventId;
+		const curveVersionId = event.referenceCurve.curveVersionId;
+		const requestId = ++initialBaselineCurveRequestId;
+		initialBaselineCurvePointsLoading = true;
+		error = '';
+		try {
+			const page = await loadCalibrationCurvePoints({ calibrationEventId: eventId, curveVersionId,
+				cellIndex, offset, limit });
+			if (requestId === initialBaselineCurveRequestId && event?.calibrationEventId === eventId
+				&& event.referenceCurve?.curveVersionId === curveVersionId) {
+				initialBaselineCurvePointPage = page;
+			}
+		} catch (cause) {
+			if (requestId === initialBaselineCurveRequestId && event?.calibrationEventId === eventId) error = message(cause);
+		} finally {
+			if (requestId === initialBaselineCurveRequestId) initialBaselineCurvePointsLoading = false;
 		}
 	}
 
@@ -281,10 +378,16 @@
 		error = '';
 		notice = '';
 		try {
-			const draft = event?.calibrationEventId === calibrationEventId
-				? event
-				: await getCalibrationEvent(calibrationEventId);
-			applyEvent(draft, true);
+			let draft = event?.calibrationEventId === calibrationEventId ? event : null;
+			if (!draft) {
+				selectedEventId = calibrationEventId;
+				const request = beginEventDetailRequest(calibrationEventId);
+				const detail = await getCalibrationEvent(calibrationEventId);
+				if (!applyEventDetailReadback(detail, request, true)) return;
+				draft = detail;
+			} else {
+				applyEvent(draft, true);
+			}
 			// startEvent owns the mutation guard; loading only protects the lookup.
 			loading = false;
 			await startEvent();
@@ -318,13 +421,15 @@
 		error = '';
 		notice = '';
 		try {
+			const request = beginEventDetailRequest(event.calibrationEventId);
 			const [detail, telemetry] = await Promise.all([
 				getCalibrationEvent(event.calibrationEventId), getBmsStringTelemetry(selectedStringIndex)
 			]);
-			applyEvent(detail);
-			liveTelemetry = telemetry;
-			if (!opensStageWorkflow(detail)) workflowOpen = false;
-			notice = 'Event state reloaded from the server.';
+			if (applyEventDetailReadback(detail, request)) {
+				liveTelemetry = telemetry;
+				if (!opensStageWorkflow(detail)) workflowOpen = false;
+				notice = 'Event state reloaded from the server.';
+			}
 		} catch (cause) {
 			error = message(cause);
 		} finally {
@@ -335,15 +440,17 @@
 	async function refreshFromServer() {
 		if (!event || loading || mutating || refreshing || event.closedAt) return;
 		const eventId = event.calibrationEventId;
+		const request = beginEventDetailRequest(eventId);
 		refreshing = true;
 		try {
 			const [refreshed, telemetry] = await Promise.all([
 				getCalibrationEvent(eventId), getBmsStringTelemetry(selectedStringIndex)
 			]);
-			liveTelemetry = telemetry;
 			if (event?.calibrationEventId === eventId && !loading && !mutating) {
-				applyEvent(refreshed);
-				if (!opensStageWorkflow(refreshed)) workflowOpen = false;
+				if (applyEventDetailReadback(refreshed, request)) {
+					liveTelemetry = telemetry;
+					if (!opensStageWorkflow(refreshed)) workflowOpen = false;
+				}
 			}
 		} catch {
 			// A background refresh must not replace an actionable operator error.
@@ -355,7 +462,8 @@
 	async function recoverAfterMutationFailure(cause: unknown, previous: CalibrationEventDetail) {
 		const failure = message(cause);
 		try {
-			applyEvent(await getCalibrationEvent(previous.calibrationEventId));
+			const request = beginEventDetailRequest(previous.calibrationEventId);
+			applyEventDetailReadback(await getCalibrationEvent(previous.calibrationEventId), request);
 		} catch {
 			event = previous;
 		}
@@ -470,12 +578,52 @@
 	function mapRealInitialBaselineTicket(detail: CalibrationEventDetail, evidence: CalibrationManualEvidence[], samples: CalibrationSample[]): InitialBaselineDemoTicket {
 		const seed = createInitialBaselineDemoTicket(selectedStringIndex, selectedString?.stringName ?? detail.configuration.stringKey);
 		const has = (type: string) => evidence.some((item) => item.evidenceType === type && ['PASS', 'RECORDED'].includes(item.status));
+		const numericEvidence = (type: string) => evidence.filter((item) => item.evidenceType === type
+			&& item.numericValue != null).at(-1)?.numericValue ?? null;
 		const process = (type: string) => detail.processes.find((item) => item.type === type);
 		const completed = (type: string) => process(type)?.state === 'COMPLETED';
+		const finalSample = (type: string) => {
+			const target = process(type);
+			return target ? samples.filter((item) => item.calibrationProcessId === target.calibrationProcessId
+				&& item.processAttemptNumber === target.attemptNumber && item.persistenceReason === 'FINAL_SNAPSHOT')
+				.sort((a, b) => a.sampleId - b.sampleId).at(-1) ?? null : null;
+		};
 		const vocProcess = process('VOC_BASELINE_CAPTURE');
-		const voc = vocProcess?.state === 'COMPLETED' ? samples.filter((item) => item.calibrationProcessId === vocProcess.calibrationProcessId
-			&& item.processAttemptNumber === vocProcess.attemptNumber && item.persistenceReason === 'FINAL_SNAPSHOT').sort((a, b) => a.sampleId - b.sampleId).at(-1) : null;
+		const voc = vocProcess?.state === 'COMPLETED' ? finalSample('VOC_BASELINE_CAPTURE') : null;
+		const dischargeProcess = process('CONTROLLED_DISCHARGE');
+		const dischargeSamples = dischargeProcess ? samples.filter((item) => item.calibrationProcessId === dischargeProcess.calibrationProcessId
+			&& item.processAttemptNumber === dischargeProcess.attemptNumber).sort((a, b) => a.sampleId - b.sampleId) : [];
+		const cutoffSample = dischargeSamples.filter((item) => item.persistenceReason === 'CUTOFF' && item.quality === 'VALID').at(-1)
+			?? dischargeSamples.at(-1) ?? null;
+		const recoveryFloat = finalSample('RECOVERY_FLOAT_STABILIZATION');
+		const cooldown = finalSample('COOL_DOWN_TO_AMBIENT');
+		const ratedCapacityAh = typeof detail.configuration.ratedCapacityAh === 'number' ? detail.configuration.ratedCapacityAh : null;
+		const allCellsEndpointAh = dischargeProcess?.dischargeRuntime?.allCellsEndpointAh ?? cutoffSample?.rawUsedAh ?? null;
+		const lowestCellVoltageV = cutoffSample?.cells.map((cell) => cell.voltageV)
+			.filter((value): value is number => value != null && Number.isFinite(value)).reduce<number | null>(
+				(lowest, value) => lowest == null || value < lowest ? value : lowest, null) ?? null;
+		const resistanceValues = recoveryFloat?.cells.map((cell) => cell.resistanceUohm)
+			.filter((value): value is number => value != null && Number.isFinite(value)) ?? [];
+		const averageResistanceUohm = resistanceValues.length
+			? resistanceValues.reduce((total, value) => total + value, 0) / resistanceValues.length : null;
+		const ambientTemperatureC = cooldown?.ambientTemperatureC ?? null;
+		const cooldownCellTemperatures = cooldown?.cells.map((cell) => cell.temperatureC)
+			.filter((value): value is number => value != null && Number.isFinite(value)) ?? [];
+		const cooldownDeltaC = ambientTemperatureC == null || !cooldownCellTemperatures.length ? null
+			: Math.max(...cooldownCellTemperatures.map((value) => Math.abs(value - ambientTemperatureC)));
+		const cellCount = typeof detail.configuration.cellCount === 'number' ? detail.configuration.cellCount : null;
+		const floatVoltagePerCell = typeof detail.configuration.floatVoltagePerCell === 'number'
+			? detail.configuration.floatVoltagePerCell : null;
+		const floatTargetVoltageV = cellCount != null && floatVoltagePerCell != null ? cellCount * floatVoltagePerCell : null;
+		const allowedTemperatureDeltaC = typeof detail.configuration.cooldownAllowedTemperatureDeltaC === 'number'
+			? detail.configuration.cooldownAllowedTemperatureDeltaC : 0.3;
+		const midpointVoltageV = numericEvidence('MIDPOINT_VOLTAGE') ?? recoveryFloat?.midpointVoltageV ?? null;
+		const floatCurrentMa = recoveryFloat?.domainCurrentA == null ? null : Math.abs(recoveryFloat.domainCurrentA) * 1000;
+		const initialSohPct = allCellsEndpointAh == null || ratedCapacityAh == null || ratedCapacityAh <= 0 ? null
+			: Math.min(100, allCellsEndpointAh * 100 / ratedCapacityAh);
+		const display = (value: number | null, digits: number) => value == null || !Number.isFinite(value) ? '—' : value.toFixed(digits);
 		const ripple = evidence.filter((item) => item.evidenceType === 'RIPPLE_AFTER_LOAD' && item.numericValue != null).at(-1)?.numericValue;
+		const rippleNoLoad = numericEvidence('RIPPLE_BEFORE_LOAD');
 		return {
 			...seed, id: `#${detail.calibrationEventId}`, currentStep: initialBaselineStep(detail),
 			status: detail.closedAt ? 'COMPLETED' : 'IN_PROGRESS', completedAt: detail.closedAt ? Date.parse(detail.closedAt) : null,
@@ -493,12 +641,25 @@
 			recoveryFloatStartedAt: process('RECOVERY_FLOAT_STABILIZATION')?.state === 'NOT_STARTED' ? null : 1,
 			recoveryFloatStableStartedAt: process('RECOVERY_FLOAT_STABILIZATION')?.state === 'NOT_STARTED' ? null : 1,
 			recoveryFloatConfirmed: has('RECOVERY_FLOAT_STABILITY_REVIEWED'), resistanceMeasured: has('CELL_RESISTANCE_SAMPLE_REVIEWED'),
-			loadConnectedForRipple: has('LOAD_CONNECTED_CONFIRMATION'), rippleWithLoad: ripple == null ? '' : String(ripple),
+			floatCurrent: floatCurrentMa == null ? '' : String(floatCurrentMa),
+			floatCurrentMeasured: has('FLOAT_CURRENT_REVIEWED'), midpointVoltage: midpointVoltageV == null ? '' : String(midpointVoltageV),
+			midpointMeasured: has('MIDPOINT_VOLTAGE'), rippleNoLoad: rippleNoLoad == null ? '' : String(rippleNoLoad),
+			rippleNoLoadMeasured: has('RIPPLE_BEFORE_LOAD'), loadConnectedForRipple: has('LOAD_CONNECTED_CONFIRMATION'), rippleWithLoad: ripple == null ? '' : String(ripple),
 			rippleWithLoadMeasured: has('RIPPLE_AFTER_LOAD'), chargerOpenedForVoc: has('CHARGER_MCB_OPEN_CONFIRMATION'),
 			vocCaptureStartedAt: voc?.measurementTime ? Date.parse(voc.measurementTime) : null,
 			vocSnapshot: voc ? { capturedAt: Date.parse(voc.measurementTime ?? voc.createdAt ?? '') || Date.now(), stringVoltageV: voc.stringVoltageV ?? 0,
 				cells: voc.cells.map((cell) => ({ cellId: cell.cellIndex, voltageV: cell.voltageV ?? 0 })) } : null,
-			vocBaselineConfirmed: has('VOC_BASELINE_CONFIRMATION')
+			vocBaselineConfirmed: has('VOC_BASELINE_CONFIRMATION'),
+			summary: {
+				stringVoltage: display(floatTargetVoltageV, 1), midpointVoltage: display(midpointVoltageV, 3),
+				dischargedCapacity: display(allCellsEndpointAh, 3), initialSoh: display(initialSohPct, 1),
+				lowestCellVoltage: display(lowestCellVoltageV, 3),
+				stopReason: dischargeProcess?.state === 'COMPLETED' && allCellsEndpointAh != null ? 'CELL_CUTOFF' : '—',
+				floatCurrent: display(floatCurrentMa, 1), internalResistance: display(averageResistanceUohm, 2),
+				ambientTemperature: display(ambientTemperatureC, 1), temperatureDelta: display(cooldownDeltaC, 1),
+				allowedTemperatureDelta: display(allowedTemperatureDeltaC, 1),
+				rippleNoLoad: display(rippleNoLoad, 3), rippleWithLoad: display(ripple ?? null, 3)
+			}
 		};
 	}
 
@@ -508,12 +669,59 @@
 		mutating = true;
 		error = '';
 		try {
-			applyEvent(await appendCalibrationEvidence({ calibrationEventId: event.calibrationEventId,
+			const updated = await appendCalibrationEvidence({ calibrationEventId: event.calibrationEventId,
 				calibrationStageId: currentStage.calibrationStageId, expectedEventVersion: event.eventVersion,
 				evidenceType: type, status: 'PASS', ...(value !== undefined ? { numericValue: value, unit } : { textValue: 'Confirmed' }),
-				...(sampleId !== undefined ? { calibrationSampleId: sampleId } : {}) }));
+				...(sampleId !== undefined ? { calibrationSampleId: sampleId } : {}) });
+			applyEvent(updated, false, false);
+			// Keep the checkbox and dependent controls tied to persisted readback. In
+			// particular, the discharge panel appears only after TEST_LOAD_CONNECTED
+			// can be read from the append-only evidence history.
+			await syncInitialBaselineReadback(updated);
 		} catch (cause) { await recoverAfterMutationFailure(cause, previous); }
 		finally { mutating = false; }
+	}
+
+	async function confirmRealInitialBaselineRecoveryLoadConnected() {
+		if (!event || !currentStage || event.eventType !== 'INITIAL_BASELINE' || mutating) return;
+		const previous = event;
+		mutating = true;
+		error = '';
+		notice = '';
+		try {
+			let detail = event;
+			let stage = currentStage;
+			if (stage.type === 'POST_RECHARGE_FLOAT') {
+				const complete = detail.allowedActions.find((action) => action.actionCode === 'COMPLETE_STAGE');
+				if (!complete?.enabled) {
+					throw new Error(complete?.disabledReason
+						?? 'Finish and save all no-load measurements before confirming the operating load.');
+				}
+				detail = await executeCalibrationStageAction(detail.calibrationEventId, stage.calibrationStageId,
+					complete.actionCode, detail.eventVersion, '', []);
+				applyEvent(detail, false, false);
+				await syncInitialBaselineReadback(detail);
+				stage = detail.stages.find((item) => item.calibrationStageId === detail.currentStageId) ?? stage;
+			}
+			if (stage.type !== 'BASELINE_CAPTURE') {
+				throw new Error(`Load confirmation is available only in BASELINE_CAPTURE; backend current stage is ${stage.type}.`);
+			}
+			const updated = await appendCalibrationEvidence({
+				calibrationEventId: detail.calibrationEventId,
+				calibrationStageId: stage.calibrationStageId,
+				expectedEventVersion: detail.eventVersion,
+				evidenceType: 'LOAD_CONNECTED_CONFIRMATION',
+				status: 'PASS',
+				textValue: 'Confirmed'
+			});
+			applyEvent(updated, false, false);
+			await syncInitialBaselineReadback(updated);
+			notice = `LOAD_CONNECTED_CONFIRMATION was saved at event version ${updated.eventVersion}.`;
+		} catch (cause) {
+			await recoverAfterMutationFailure(cause, previous);
+		} finally {
+			mutating = false;
+		}
 	}
 
 	async function configureRealInitialBaselineDemoTimeScale(factor: 1 | 60) {
@@ -555,6 +763,63 @@
 		finally { mutating = false; }
 	}
 
+	async function configureRealInitialBaselineActiveFloatRange(processType: 'FLOAT_SETTLEMENT_TO_VFLOAT' | 'RECOVERY_FLOAT_STABILIZATION', currentMinA: number, currentMaxA: number, reason: string) {
+		if (!event || !currentStage || mutating || !reason.trim()) return;
+		const active = event.processes.find((item) => item.type === processType
+			&& item.calibrationStageId === currentStage?.calibrationStageId && item.state === 'ACTIVE');
+		if (!active) return;
+		const previous = event; mutating = true; error = '';
+		try {
+			applyEvent(await configureActiveCalibrationFloatCurrentRange({
+				calibrationEventId: event.calibrationEventId, calibrationStageId: currentStage.calibrationStageId,
+				calibrationProcessId: active.calibrationProcessId, processAttemptNumber: active.attemptNumber,
+				expectedEventVersion: event.eventVersion, floatCurrentMinA: currentMinA,
+				floatCurrentMaxA: currentMaxA, reason
+			}));
+		} catch (cause) { await recoverAfterMutationFailure(cause, previous); throw cause; }
+		finally { mutating = false; }
+	}
+
+	async function configureRealInitialBaselineActiveVocDeadband(deadbandA: number, reason: string) {
+		if (!event || !currentStage || mutating || !reason.trim()) return;
+		const active = event.processes.find((item) => item.type === 'VOC_BASELINE_CAPTURE'
+			&& item.calibrationStageId === currentStage?.calibrationStageId && item.state === 'ACTIVE');
+		if (!active) return;
+		const previous = event; mutating = true; error = '';
+		try {
+			applyEvent(await configureActiveCalibrationVocDeadband({
+				calibrationEventId: event.calibrationEventId, calibrationStageId: currentStage.calibrationStageId,
+				calibrationProcessId: active.calibrationProcessId, processAttemptNumber: active.attemptNumber,
+				expectedEventVersion: event.eventVersion, vocCurrentDeadbandA: deadbandA, reason
+			}));
+		} catch (cause) { await recoverAfterMutationFailure(cause, previous); throw cause; }
+		finally { mutating = false; }
+	}
+
+	async function configureRealInitialBaselineDischargeMonitor(policy: {
+		safetyFloorVoltagePerCell: number; maxWrongCurrentDirectionSamples: number;
+	}) {
+		if (!event || !currentStage || event.eventType !== 'INITIAL_BASELINE'
+			|| currentStage.type !== 'WAITING_FOR_LOAD' || mutating) return;
+		const previous = event;
+		mutating = true;
+		error = '';
+		notice = '';
+		try {
+			const updated = await configureCalibrationDischargeMonitor({
+				calibrationEventId: event.calibrationEventId,
+				calibrationStageId: currentStage.calibrationStageId,
+				expectedEventVersion: event.eventVersion,
+				...policy
+			});
+			applyEvent(updated, false, false);
+			await syncInitialBaselineReadback(updated);
+			notice = `Discharge monitor saved: safety floor ${policy.safetyFloorVoltagePerCell.toFixed(3)} V/cell, `
+				+ `${policy.maxWrongCurrentDirectionSamples} wrong-current samples allowed.`;
+		} catch (cause) { await recoverAfterMutationFailure(cause, previous); }
+		finally { mutating = false; }
+	}
+
 	async function mutateRealInitialBaselineProcess(type: string, complete: boolean) {
 		if (!event || !currentStage || mutating) return;
 		const process = event.processes.find((item) => item.type === type && item.calibrationStageId === currentStage.calibrationStageId);
@@ -570,10 +835,67 @@
 	}
 
 	function startRealInitialBaselineProcess(type: string) { void mutateRealInitialBaselineProcess(type, false); }
+
+	async function startRealInitialBaselineControlledDischarge() {
+		if (!event || !currentStage || event.eventType !== 'INITIAL_BASELINE' || mutating) return;
+		if (!['WAITING_FOR_LOAD', 'DISCHARGE'].includes(currentStage.type)) return;
+		const previous = event;
+		let accepted = event;
+		mutating = true;
+		error = '';
+		notice = '';
+		try {
+			if (currentStage.type === 'WAITING_FOR_LOAD') {
+				const complete = event.allowedActions.find((action) => action.actionCode === 'COMPLETE_STAGE');
+				if (!complete?.enabled) return;
+				accepted = await executeCalibrationStageAction(event.calibrationEventId,
+					currentStage.calibrationStageId, complete.actionCode, event.eventVersion);
+			}
+			const dischargeStage = accepted.stages.find((stage) => stage.calibrationStageId === accepted.currentStageId);
+			const process = accepted.processes.find((item) => item.type === 'CONTROLLED_DISCHARGE'
+				&& item.calibrationStageId === dischargeStage?.calibrationStageId);
+			if (dischargeStage?.type !== 'DISCHARGE' || process?.state !== 'NOT_STARTED') {
+				throw new Error('Backend did not expose a startable CONTROLLED_DISCHARGE process.');
+			}
+			const started = await startCalibrationProcess(accepted.calibrationEventId,
+				dischargeStage.calibrationStageId, process.calibrationProcessId, accepted.eventVersion);
+			// Do not render an intermediate lifecycle. Both versioned mutations have
+			// succeeded, so only the final authoritative response is applied.
+			applyEvent(started, true);
+			notice = `Controlled discharge started at event version ${started.eventVersion}.`;
+		} catch (cause) {
+			const failure = message(cause);
+			try {
+				const request = beginEventDetailRequest(previous.calibrationEventId);
+				applyEventDetailReadback(await getCalibrationEvent(previous.calibrationEventId), request, true);
+			} catch {
+				// If stage completion succeeded but the follow-up call or reload failed,
+				// retain the newest response we actually received, never the stale input.
+				applyEvent(accepted, true);
+			}
+			error = failure;
+		} finally {
+			mutating = false;
+		}
+	}
 	function completeRealInitialBaselineProcess(type: string) { void mutateRealInitialBaselineProcess(type, true); }
+	async function confirmRealInitialBaselineDischargeStopped() {
+		if (!event || !currentStage || event.eventType !== 'INITIAL_BASELINE' || mutating) return;
+		const process = event.processes.find((item) => item.type === 'CONTROLLED_DISCHARGE'
+			&& item.calibrationStageId === currentStage.calibrationStageId);
+		if (!process?.dischargeRuntime?.canConfirmDischargeStopped) return;
+		const previous = event;
+		mutating = true; error = ''; notice = '';
+		try {
+			applyEvent(await confirmCalibrationDischargeStopped(event.calibrationEventId,
+				currentStage.calibrationStageId, process.calibrationProcessId, event.eventVersion), true);
+			notice = 'Discharge stop confirmed. The event is blocked for Redo or Abort.';
+		} catch (cause) { await recoverAfterMutationFailure(cause, previous); }
+		finally { mutating = false; }
+	}
 	function continueRealInitialBaseline() {
 		const action = event?.allowedActions.find((item) => item.actionCode === 'COMPLETE_STAGE');
-		if (action) void executeAction(action);
+		if (action) void executeRealInitialBaselineAction(action, '', []);
 	}
 
 	async function executeRealInitialBaselineAction(action: CalibrationAllowedAction, reason: string, acknowledged: string[]) {

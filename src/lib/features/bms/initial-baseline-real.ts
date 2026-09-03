@@ -1,4 +1,4 @@
-import type { BmsStringTelemetry, CalibrationAllowedAction, CalibrationEventDetail, CalibrationManualEvidence, CalibrationSample } from '$lib/services/bms-api';
+import type { BmsStringTelemetry, CalibrationAllowedAction, CalibrationCurvePointPage, CalibrationEventDetail, CalibrationManualEvidence, CalibrationSample } from '$lib/services/bms-api';
 
 export const INITIAL_BASELINE_STAGE_GROUPS = [
 	['PREREQUISITES'],
@@ -14,12 +14,21 @@ export type InitialBaselineRealAdapter = {
 	evidence: CalibrationManualEvidence[];
 	samples: CalibrationSample[];
 	telemetry: BmsStringTelemetry | null;
+	curvePointPage: CalibrationCurvePointPage | null;
+	curvePointsLoading: boolean;
 	busy: boolean;
 	onEvidence(type: string, value?: number, unit?: string, sampleId?: number): void;
 	onConfigureDemoTimeScale(factor: 1 | 60): void;
 	onConfigureFloatStablePolicy(policy: { durationMinutes: number; voltageToleranceV: number; currentMinA: number; currentMaxA: number }): void;
+	onConfigureActiveFloatRange(processType: 'FLOAT_SETTLEMENT_TO_VFLOAT' | 'RECOVERY_FLOAT_STABILIZATION', currentMinA: number, currentMaxA: number, reason: string): Promise<void>;
+	onConfigureActiveVocDeadband(deadbandA: number, reason: string): Promise<void>;
+	onConfirmRecoveryLoadConnected(): Promise<void>;
+	onConfigureDischargeMonitor(policy: { safetyFloorVoltagePerCell: number; maxWrongCurrentDirectionSamples: number }): void;
+	onLoadCurvePoints(cellIndex: number, offset: number, limit: number): void;
 	onStartProcess(type: string): void;
+	onStartControlledDischarge(): void;
 	onCompleteProcess(type: string): void;
+	onConfirmDischargeStopped(): void;
 	onContinue(): void;
 	onExecuteAction(action: CalibrationAllowedAction, reason: string, acknowledgedItems: string[]): void;
 	onRedoStage(reason: string): void;

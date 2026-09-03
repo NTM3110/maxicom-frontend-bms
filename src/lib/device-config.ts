@@ -70,7 +70,12 @@ const defaultConfig: DeviceConfig = {
 export function getNavigationForConfig(config: DeviceConfig) {
 	const enabled = new Set(config.navigation.enabledItems);
 	return navigationGroups
-		.map((group) => ({ ...group, items: group.items.filter((item) => enabled.has(item.id)) }))
+		.map((group) => ({
+			...group,
+			items: group.items.filter((item) =>
+				enabled.has(item.id)
+				&& !(config.device.product === 'bms' && group.label === 'SYSTEM' && item.id === 'system-info'))
+		}))
 		.filter((group) => group.items.length > 0);
 }
 

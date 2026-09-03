@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { AlertTriangle, ArrowLeft, CheckCircle2, ClipboardCheck, Play } from '@lucide/svelte';
-	import type { BatteryString, CalibrationAllowedAction, CalibrationProcess } from '$lib/services/bms-api';
+	import { AlertTriangle, ArrowLeft, CheckCircle2, ClipboardCheck, Play, ShieldAlert } from '@lucide/svelte';
+	import type { BatteryString, CalibrationAllowedAction, CalibrationProcess, CalibrationStage } from '$lib/services/bms-api';
+	import { formatCalibrationTime } from '$lib/services/calibration-time';
 	import type { InitialBaselineDemoCellResistance, InitialBaselineDemoTicket } from './initial-baseline-demo';
 	import DischargeTrendChart from './DischargeTrendChart.svelte';
 	import InitialBaselineStageFive from './InitialBaselineStageFive.svelte';
@@ -10,6 +11,7 @@
 
 	const DEMO_STABLE_PERCENT_MS_PER_CONFIGURED_MINUTE = 20;
 	const RECOVERY_FLOAT_STABLE_DURATION_SECONDS = 60;
+	const DISCHARGE_PERIODIC_WALL_CLOCK_SECONDS = 30;
 
 	type BaselineStep = {
 		title: string;
@@ -51,7 +53,12 @@
 	let floatCurrentMaxInput = $state((ticket.floatCurrentMaxA ?? 0.2).toFixed(1));
 	let floatPolicyInputEventVersion = $state<number | null>(null);
 	let dischargeProfile = $state<'0.1C10' | '0.2C5'>('0.1C10');
-	let dischargeSamplingMinutes = $state('30');
+	let safetyFloorInput = $state('');
+	let safetyFloorInputRevision = $state('');
+	let maxWrongCurrentDirectionSamplesInput = $state('');
+	let selectedCurveCell = $state(1);
+	let selectedCurveVersionId = $state<number | null>(null);
+	const CURVE_PAGE_SIZE = 50;
 	let dischargeLoadConnected = $state(false);
 	let dischargeScheduled = $state(false);
 	let dischargeStartedAt = $state<number | null>(null);
@@ -74,25 +81,147 @@
 	let rippleWithLoadMeasured = $state(ticket.rippleWithLoadMeasured ?? false);
 	let recoveryBaselineAccepted = $state(ticket.vocBaselineConfirmed ?? false);
 	let summaryApproved = $state(false);
+	let returnToServiceApproved = $state(false);
 	let floatCurrent = $state(ticket.floatCurrent ?? '82');
 	let midpointVoltage = $state(ticket.midpointVoltage || (floatVoltage / 2).toFixed(1));
 	let rippleNoLoad = $state(ticket.rippleNoLoad ?? '0.6');
 	let rippleWithLoad = $state(ticket.rippleWithLoad ?? '0.8');
-	let dischargeCurrent = $derived((batteryString?.ratedCapacity ?? 200) * (dischargeProfile === '0.2C5' ? 0.2 : 0.1));
-	let dischargeCutoff = $derived(dischargeProfile === '0.2C5' ? 1.75 : 1.8);
+	let manualMeasurementEventId = $state<number | null>(null);
+	let rippleNoLoadEvidenceId = $state<number | null>(null);
+	let rippleWithLoadEvidenceId = $state<number | null>(null);
+	let rippleNoLoadDirty = $state(false);
+	let rippleWithLoadDirty = $state(false);
+	let rippleNoLoadFocused = $state(false);
+	let rippleWithLoadFocused = $state(false);
+	let rippleNoLoadSubmissionPending = $state(false);
+	let rippleWithLoadSubmissionPending = $state(false);
+	let initialFloatPolicyEditor = $state(false);
+	let initialFloatPolicyReason = $state('');
+	async function submitInitialFloatPolicy() {
+		const minA = Number(floatCurrentMinInput);
+		const maxA = Number(floatCurrentMaxInput);
+		if (!real || real.busy || !initialFloatPolicyReason.trim() || !Number.isFinite(minA)
+				|| !Number.isFinite(maxA) || minA < 0 || maxA < minA) return;
+		try {
+			await real.onConfigureActiveFloatRange('FLOAT_SETTLEMENT_TO_VFLOAT', minA, maxA,
+					initialFloatPolicyReason);
+			initialFloatPolicyEditor = false;
+			initialFloatPolicyReason = '';
+		} catch {
+			// The parent keeps the authoritative backend error and refreshed event visible.
+		}
+	}
+	let dischargeCurrent = $derived(configurationNumber('ratedCapacityAh', batteryString?.ratedCapacity ?? 200)
+		* (real?.event.configuration.dischargeMethod === 'C5' || !real && dischargeProfile === '0.2C5' ? 0.2 : 0.1));
+	let dischargeCutoff = $derived(configurationNumber('cutoffVoltagePerCell', dischargeProfile === '0.2C5' ? 1.75 : 1.8));
+	let realCurrentStage = $derived(real?.event.stages.find((stage) => stage.calibrationStageId === real.event.currentStageId) ?? null);
+	let displayedDischargeStage = $derived(real ? dischargeStageForView(realCurrentStage, real.event.stages) : null);
+	let displayedDischargePhase = $derived(displayedDischargeStage?.type ?? null);
+	let dischargeStageIsAuthoritativeCurrent = $derived(Boolean(real && displayedDischargeStage
+		&& displayedDischargeStage.calibrationStageId === real.event.currentStageId));
+	let controlledDischargeProcess = $derived(real ? initialBaselineProcess(real, 'CONTROLLED_DISCHARGE') : null);
+	let configuredDischargeSamplingSeconds = $derived(real
+		? dischargeProcessConfigurationNumber('dischargeSamplingIntervalSeconds', null)
+		: DISCHARGE_PERIODIC_WALL_CLOCK_SECONDS);
+	let waitingForLoadCompleteAction = $derived(real?.event.allowedActions.find((action) => action.actionCode === 'COMPLETE_STAGE') ?? null);
+	let dischargeRevalidateAction = $derived(real?.event.allowedActions.find((action) => action.actionCode === 'REVALIDATE_STAGE') ?? null);
+	let dischargeRevalidationRequired = $derived(Boolean(real && dischargeStageIsAuthoritativeCurrent
+		&& (real.event.status === 'REVALIDATION_REQUIRED' || realCurrentStage?.state === 'REVALIDATION_REQUIRED')));
+	let startControlledDischargeDisabledReason = $derived(controlledDischargeStartDisabledReason());
+	let canStartControlledDischarge = $derived(startControlledDischargeDisabledReason === null);
+	let realDischargeSamples = $derived(real && controlledDischargeProcess ? real.samples
+		.filter((sample) => sample.calibrationProcessId === controlledDischargeProcess?.calibrationProcessId
+			&& sample.processAttemptNumber === controlledDischargeProcess?.attemptNumber)
+		.sort((left, right) => left.sampleId - right.sampleId) : []);
+	let latestDischargeSample = $derived(realDischargeSamples.at(-1) ?? null);
+	// Live telemetry is a readiness preview only. Once the persisted process has
+	// started, every official discharge metric and chart point must come from the
+	// event/process/attempt-linked calibration samples below.
+	let showLiveDischargePreview = $derived(Boolean(real && controlledDischargeProcess?.state === 'NOT_STARTED'
+		&& latestDischargeSample === null));
+	let liveDischargeStringVoltage = $derived(showLiveDischargePreview ? finiteNumber(real?.telemetry?.summary.stringVoltage) : null);
+	let liveDischargeCurrent = $derived(showLiveDischargePreview ? finiteNumber(real?.telemetry?.summary.stringCurrent) : null);
+	let liveDischargeLowestCellVoltage = $derived(showLiveDischargePreview ? lowestLiveCellVoltage() : null);
+	let displayedDischargeStringVoltage = $derived(latestDischargeSample?.stringVoltageV ?? liveDischargeStringVoltage);
+	let displayedDischargeCurrent = $derived(latestDischargeSample?.domainCurrentA ?? liveDischargeCurrent);
+	let displayedDischargeLowestCellVoltage = $derived(latestDischargeSample ? lowestPersistedCellVoltage() : liveDischargeLowestCellVoltage);
+	let cutoffDischargeSample = $derived(realDischargeSamples.filter((sample) => sample.persistenceReason === 'CUTOFF'
+		&& sample.quality === 'VALID').at(-1) ?? null);
+	let realDischargeTrend = $derived(realDischargeSamples.map((sample) => ({
+		label: sample.measurementTime ? new Date(sample.measurementTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : `#${sample.snapshotSequence}`,
+		voltageV: sample.averageVoltageV ?? (sample.cells.length ? sample.cells.reduce((sum, cell) => sum + (cell.voltageV ?? 0), 0) / sample.cells.length : 0),
+		usedAh: sample.rawUsedAh ?? 0
+	})));
+	let dischargeRecommendation = $derived(controlledDischargeProcess?.runtime?.recommendation ?? null);
+	let dischargeBlockers = $derived(controlledDischargeProcess?.runtime?.blockers ?? []);
+	let dischargeSafety = $derived(controlledDischargeProcess?.dischargeRuntime ?? null);
+	let authoritativeSafetyFloor = $derived(configurationNumber('safetyFloorVoltagePerCell', Math.max(0.001, dischargeCutoff - 0.10)));
+	let safetyFloorValue = $derived(Number(safetyFloorInput));
+	let safetyFloorError = $derived(!Number.isFinite(safetyFloorValue) || safetyFloorValue <= 0
+		? 'Safety floor must be a positive voltage.'
+		: safetyFloorValue >= dischargeCutoff ? `Safety floor must be below the ${dischargeCutoff.toFixed(3)} V cut-off.` : '');
+	let safetyFloorDirty = $derived(real ? Math.abs(safetyFloorValue - authoritativeSafetyFloor) > 0.0000001 : false);
+	let authoritativeMaxWrongCurrentDirectionSamples = $derived(dischargeProcessConfigurationNumber(
+		'maxWrongCurrentDirectionSamples', 3));
+	let maxWrongCurrentDirectionSamplesValue = $derived(Number(maxWrongCurrentDirectionSamplesInput));
+	let maxWrongCurrentDirectionSamplesError = $derived(!Number.isInteger(maxWrongCurrentDirectionSamplesValue)
+		|| maxWrongCurrentDirectionSamplesValue <= 0 ? 'Wrong-current sample limit must be a positive integer.' : '');
+	let maxWrongCurrentDirectionSamplesDirty = $derived(real
+		? maxWrongCurrentDirectionSamplesValue !== authoritativeMaxWrongCurrentDirectionSamples : false);
+	let dischargeMonitorDirty = $derived(safetyFloorDirty || maxWrongCurrentDirectionSamplesDirty);
+	let canConfigureSafetyFloor = $derived(Boolean(real && !real.busy && dischargeStageIsAuthoritativeCurrent
+		&& realCurrentStage?.state === 'ACTIVE' && displayedDischargePhase === 'WAITING_FOR_LOAD'
+		&& controlledDischargeProcess?.state === 'NOT_STARTED'));
+	let dischargeCrossedCellCount = $derived(dischargeSafety?.crossedCellCount ?? 0);
+	let dischargeConfiguredCellCount = $derived(dischargeSafety?.configuredCellCount ?? cellCount);
+	let dischargeCrossingPercent = $derived(dischargeConfiguredCellCount > 0
+		? Math.min(100, dischargeCrossedCellCount * 100 / dischargeConfiguredCellCount) : 0);
+	let dischargeCellStates = $derived(Object.entries(dischargeSafety?.perCellState ?? {})
+		.map(([index, state]) => ({ cellIndex: Number(index), ...state }))
+		.filter((state) => Number.isInteger(state.cellIndex) && state.cellIndex > 0)
+		.sort((left, right) => left.cellIndex - right.cellIndex));
+	let curvePageMatchesSelection = $derived(Boolean(real?.event.referenceCurve && real.curvePointPage
+		&& real.curvePointPage.referenceCurve.curveVersionId === real.event.referenceCurve.curveVersionId
+		&& (real.curvePointPage.total === 0
+			|| real.curvePointPage.points.every((point) => point.cellIndex === selectedCurveCell))));
 	let dischargeProgress = $derived(real ? initialBaselineProcess(real, 'CONTROLLED_DISCHARGE')?.state === 'COMPLETED' ? 100 : initialBaselineProcess(real, 'CONTROLLED_DISCHARGE')?.state === 'ACTIVE' ? 50 : 0 : dischargeStartedAt == null ? 0 : Math.min(100, Math.floor((now - dischargeStartedAt) / 120)));
 	let dischargeComplete = $derived(dischargeProgress >= 100);
 	let demoDischargedCapacity = $derived(((batteryString?.ratedCapacity ?? 200) * .984 * dischargeProgress / 100).toFixed(1));
-	let recoveryProgress = $derived(real ? initialBaselineProcess(real, 'RECOVERY_CHARGE_TO_VBOOST')?.state === 'COMPLETED' ? 100 : initialBaselineProcess(real, 'RECOVERY_CHARGE_TO_VBOOST')?.state === 'ACTIVE' ? 50 : 0 : recoveryStartedAt == null ? 0 : Math.min(100, Math.floor((now - recoveryStartedAt) / 120)));
-	let recoveryChargeComplete = $derived(real ? initialBaselineProcess(real, 'RECOVERY_CHARGE_TO_VBOOST')?.state === 'COMPLETED' : recoveryProgress >= 100);
-	let recoveryFloatProgress = $derived(recoveryFloatStartedAt == null ? 0 : Math.min(100, Math.floor((now - recoveryFloatStartedAt) / 60)));
-	let recoveryFloatReached = $derived(real ? initialBaselineProcess(real, 'RECOVERY_FLOAT_STABILIZATION')?.state === 'COMPLETED' : recoveryFloatProgress >= 100);
+	let recoveryBoostProcess = $derived(real ? initialBaselineProcess(real, 'RECOVERY_CHARGE_TO_VBOOST') : null);
+	let recoveryFloatProcess = $derived(real ? initialBaselineProcess(real, 'RECOVERY_FLOAT_STABILIZATION') : null);
+	let demoRecoveryProgress = $derived(recoveryStartedAt == null ? 0 : Math.min(100, Math.floor((now - recoveryStartedAt) / 120)));
+	let demoRecoveryFloatProgress = $derived(recoveryFloatStartedAt == null ? 0 : Math.min(100, Math.floor((now - recoveryFloatStartedAt) / 60)));
+	let recoveryStarted = $derived(real ? Boolean(recoveryBoostProcess && recoveryBoostProcess.state !== 'NOT_STARTED') : recoveryStartedAt !== null);
+	let recoveryChargeComplete = $derived(real ? recoveryBoostProcess?.state === 'COMPLETED' : demoRecoveryProgress >= 100);
+	let recoveryFloatStarted = $derived(real ? Boolean(recoveryFloatProcess && recoveryFloatProcess.state !== 'NOT_STARTED') : recoveryFloatStartedAt !== null);
 	let recoveryFloatElapsedSeconds = $derived(real ? Math.max(0, Math.floor((processCheckpointNumber('RECOVERY_FLOAT_STABILIZATION', 'stableDurationMillis') ?? 0) / 1000)) : recoveryFloatStableStartedAt == null ? 0 : Math.min(RECOVERY_FLOAT_STABLE_DURATION_SECONDS, Math.max(0, Math.floor((now - recoveryFloatStableStartedAt) / 1000))));
-	let recoveryFloatStableProgress = $derived(Math.floor(recoveryFloatElapsedSeconds * 100 / RECOVERY_FLOAT_STABLE_DURATION_SECONDS));
-	let recoveryFloatComplete = $derived(real ? initialBaselineProcess(real, 'RECOVERY_FLOAT_STABILIZATION')?.state === 'COMPLETED' : recoveryFloatElapsedSeconds >= RECOVERY_FLOAT_STABLE_DURATION_SECONDS);
+	let recoveryFloatStableSeconds = $derived(real
+		? Math.max(1, Math.round(processPolicyNumber('RECOVERY_FLOAT_STABILIZATION', 'floatStableDurationMinutes',
+			configurationNumber('floatStableDurationMinutes', 60)) * 60))
+		: RECOVERY_FLOAT_STABLE_DURATION_SECONDS);
+	let recoveryFloatStableProgress = $derived(Math.min(100,
+		Math.floor(recoveryFloatElapsedSeconds * 100 / recoveryFloatStableSeconds)));
+	let recoveryFloatComplete = $derived(real ? recoveryFloatProcess?.state === 'COMPLETED' : recoveryFloatElapsedSeconds >= RECOVERY_FLOAT_STABLE_DURATION_SECONDS);
 	let recoveryStartVoltage = $derived(dischargeCutoff * cellCount);
-	let recoveryBoostVoltage = $derived(real ? processMeasurementNumber('RECOVERY_CHARGE_TO_VBOOST', 'stringVoltageV') : recoveryStartVoltage + ((boostVoltage - recoveryStartVoltage) * recoveryProgress / 100));
-	let recoveryFloatVoltage = $derived(real ? processMeasurementNumber('RECOVERY_FLOAT_STABILIZATION', 'stringVoltageV') : boostVoltage - ((boostVoltage - floatVoltage) * recoveryFloatProgress / 100));
+	let recoveryBoostVoltage = $derived(real ? recoveryProcessMeasurementNumber('RECOVERY_CHARGE_TO_VBOOST', 'stringVoltageV') : recoveryStartVoltage + ((boostVoltage - recoveryStartVoltage) * demoRecoveryProgress / 100));
+	let recoveryBoostProcessedTemperatureC = $derived(processTemperature('RECOVERY_CHARGE_TO_VBOOST'));
+	let recoveryBoostEffectiveTargetVoltage = $derived(real ? effectiveProcessTargetVoltageV(
+		'RECOVERY_CHARGE_TO_VBOOST', 'boostStringVoltageV', boostVoltage, boostVoltagePerCell,
+		'boostTemperatureCoefficientMvPerCellC', -5) : boostVoltage);
+	let recoveryProgress = $derived(real ? processBarWidth(recoveryBoostVoltage, recoveryBoostEffectiveTargetVoltage) : demoRecoveryProgress);
+	let recoveryFloatVoltage = $derived(real ? recoveryProcessMeasurementNumber('RECOVERY_FLOAT_STABILIZATION', 'stringVoltageV') : boostVoltage - ((boostVoltage - floatVoltage) * demoRecoveryFloatProgress / 100));
+	let recoveryFloatProcessedTemperatureC = $derived(processTemperature('RECOVERY_FLOAT_STABILIZATION'));
+	let recoveryFloatEffectiveTargetVoltage = $derived(real ? effectiveProcessTargetVoltageV(
+		'RECOVERY_FLOAT_STABILIZATION', 'floatStringVoltageV', floatVoltage, floatVoltagePerCell,
+		'floatTemperatureCoefficientMvPerCellC', -3.3) : floatVoltage);
+	let recoveryFloatVoltageToleranceV = $derived(processPolicyNumber('RECOVERY_FLOAT_STABILIZATION',
+		'floatVoltageToleranceV', configurationNumber('floatVoltageToleranceV', ticket.floatVoltageToleranceV ?? 1)));
+	let recoveryFloatProgress = $derived(real ? processBarWidth(recoveryFloatVoltage, recoveryFloatEffectiveTargetVoltage) : demoRecoveryFloatProgress);
+	// RECOVERY_FLOAT_STABILIZATION is itself the authoritative Float settling and
+	// stable-window process. Show its stable monitor as soon as that process starts;
+	// the backend checkpoint (not a duplicated frontend voltage gate) decides when
+	// the observation window starts, resets, and completes.
+	let recoveryFloatReached = $derived(real ? recoveryFloatStarted : recoveryFloatProgress >= 100);
 	let recoveryFloatCurrentA = $derived(real ? processMeasurementNumber('RECOVERY_FLOAT_STABILIZATION', 'domainCurrentA') : recoveryFloatComplete
 		? ((ticket.floatCurrentMinA ?? 0.1) + (ticket.floatCurrentMaxA ?? 0.2)) / 2
 		: ticket.floatCurrentMaxA ?? 0.2);
@@ -109,6 +238,8 @@
 	let initialFloatVoltageToleranceV = $derived(realProcessPolicyNumber('floatVoltageToleranceV', real?.event.configuration.floatVoltageToleranceV ?? 1) ?? ticket.floatVoltageToleranceV ?? 1);
 	let initialFloatCurrentMinA = $derived(realProcessPolicyNumber('floatCurrentMinA', real?.event.configuration.floatCurrentMinA ?? 0.1) ?? ticket.floatCurrentMinA ?? 0.1);
 	let initialFloatCurrentMaxA = $derived(realProcessPolicyNumber('floatCurrentMaxA', real?.event.configuration.floatCurrentMaxA ?? 0.2) ?? ticket.floatCurrentMaxA ?? 0.2);
+	let canChangeInitialFloatRange = $derived(Boolean(real && viewingActiveStep && initialFloatProcess?.state === 'ACTIVE'
+		&& real.event.currentStageId === initialFloatProcess.calibrationStageId));
 	let effectiveBoostTargetVoltage = $derived(real ? effectiveBoostTargetVoltageV() : boostVoltage);
 	let effectiveFloatTargetVoltage = $derived(real ? effectiveFloatTargetVoltageV() : floatVoltage);
 	let boostProcessedTemperature = $derived(processTemperature('BOOST_CHARGE_TO_VBOOST'));
@@ -159,9 +290,11 @@
 	let displayedFloatCurrentA = $derived(real ? realFloatCurrentA : demoFloatCurrent);
 	let realVocSample = $derived(real ? finalProcessSample(real, 'VOC_BASELINE_CAPTURE') : null);
 	let realFloatSample = $derived(real ? finalProcessSample(real, 'RECOVERY_FLOAT_STABILIZATION') : null);
-	let recoveryCellResistances = $derived(real ? (realFloatSample?.cells ?? []).map((cell) => ({ cellId: cell.cellIndex, resistanceMohm: cell.resistanceUohm == null ? null : cell.resistanceUohm / 1000, quality: cell.quality, availabilityWarning: cell.availabilityWarning })) : ticket.recoveryCellResistances ?? []);
+	let recoveryCellResistances = $derived(real
+		? (realFloatSample?.cells ?? []).map((cell) => ({ cellId: cell.cellIndex, resistanceUohm: cell.resistanceUohm, quality: cell.quality, availabilityWarning: cell.availabilityWarning }))
+		: ticket.recoveryCellResistances ?? []);
 	let vocCells = $derived(real ? (realVocSample?.cells ?? []).map((cell) => ({ id: cell.cellIndex, voltage: cell.voltageV, quality: cell.quality, availabilityWarning: cell.availabilityWarning })) : (ticket.vocSnapshot?.cells ?? []).map((cell) => ({ id: cell.cellId, voltage: cell.voltageV, quality: 'VALID' })));
-	let validRecoveryResistances = $derived(recoveryCellResistances.map((cell) => cell.resistanceMohm).filter((value): value is number => value !== null && Number.isFinite(value)));
+	let validRecoveryResistances = $derived(recoveryCellResistances.map((cell) => cell.resistanceUohm).filter((value): value is number => value !== null && Number.isFinite(value)));
 	let internalResistance = $derived(validRecoveryResistances.length
 		? (validRecoveryResistances.reduce((total, value) => total + value, 0) / validRecoveryResistances.length).toFixed(2)
 		: '—');
@@ -188,27 +321,31 @@
 	let readOnly = $derived(real ? real.event.closedAt !== null : ticket.status === 'COMPLETED');
 	let summaryValues = $derived(ticket.summary ?? { stringVoltage: floatVoltage.toFixed(1), midpointVoltage, dischargedCapacity, initialSoh: initialSoh.toFixed(1), lowestCellVoltage, stopReason: dischargeStopReason, floatCurrent, internalResistance, ambientTemperature: temperatureText(ambientTemperature), temperatureDelta: temperatureText(cooldownTemperatureDelta), allowedTemperatureDelta: allowedTemperatureDelta.toFixed(1), rippleNoLoad, rippleWithLoad });
 	let cooldownReady = $derived(!!checkedItems['2-0'] && (cooldownTemperaturePassed || cooldownManualApproved) && !!checkedItems['2-1'] && !!checkedItems['2-2']);
-	let recoveryReviewComplete = $derived(real ? ['RECOVERY_FLOAT_STABILITY_REVIEWED', 'CELL_RESISTANCE_SAMPLE_REVIEWED',
-		'CHARGER_OUTPUT_CURRENT', 'MIDPOINT_VOLTAGE', 'RIPPLE_BEFORE_LOAD'].every((type) => hasInitialBaselineEvidence(real, type)) : false);
-	let recoveryReviewAwaitingContinue = $derived(real ? real.event.stages.some((stage) => stage.calibrationStageId === real.event.currentStageId
-		&& stage.type === 'POST_RECHARGE_FLOAT') && recoveryReviewComplete : false);
 	let stageFiveModel = $derived<InitialBaselineStageFiveModel>({
-		mode: real ? 'real' : 'demo', readOnly, busy: (real?.busy ?? false) || recoveryReviewAwaitingContinue, cellCount, boostVoltagePerCell, floatVoltagePerCell,
+		mode: real ? 'real' : 'demo', readOnly, busy: real?.busy ?? false, cellCount, boostVoltagePerCell, floatVoltagePerCell,
 		boostVoltage, floatVoltage, currentLimit, recoveryMcbClosed, recoverySettingsVerified,
-		recoveryStarted: recoveryStartedAt !== null, recoveryChargeComplete, recoveryProgress,
-		recoveryBoostVoltage,
-		recoveryFloatStarted: recoveryFloatStartedAt !== null, recoveryFloatReached,
-		recoveryFloatProgress, recoveryFloatVoltage, recoveryFloatCurrentA, recoveryFloatStableProgress,
-		recoveryFloatElapsedSeconds, recoveryFloatStableSeconds: RECOVERY_FLOAT_STABLE_DURATION_SECONDS,
+		recoveryStarted, recoveryChargeComplete, recoveryProgress,
+		recoveryBoostVoltage, recoveryBoostEffectiveTargetVoltage, recoveryBoostProcessedTemperatureC,
+		recoveryFloatStarted, recoveryFloatReached,
+		recoveryFloatProgress, recoveryFloatVoltage, recoveryFloatEffectiveTargetVoltage,
+		recoveryFloatProcessedTemperatureC, recoveryFloatVoltageToleranceV, recoveryFloatCurrentA, recoveryFloatStableProgress,
+		recoveryFloatElapsedSeconds, recoveryFloatStableSeconds,
 		recoveryFloatComplete, recoveryFloatConfirmed,
+		recoveryFloatCurrentMinA: processPolicyNumber('RECOVERY_FLOAT_STABILIZATION', 'floatCurrentMinA', initialFloatCurrentMinA),
+		recoveryFloatCurrentMaxA: processPolicyNumber('RECOVERY_FLOAT_STABILIZATION', 'floatCurrentMaxA', initialFloatCurrentMaxA),
+		canChangeRecoveryFloatRange: isExactActiveProcess('RECOVERY_FLOAT_STABILIZATION'),
 		resistanceCells: recoveryCellResistances, resistanceConfirmed: resistanceMeasured,
-		averageResistanceMohm: internalResistance, floatCurrent, floatCurrentConfirmed: floatCurrentMeasured,
+		averageResistanceUohm: internalResistance, floatCurrent, floatCurrentConfirmed: floatCurrentMeasured,
 		midpointVoltage, midpointConfirmed: midpointMeasured, rippleNoLoad, rippleNoLoadConfirmed: rippleNoLoadMeasured,
 		loadConnected: loadMcbClosed, rippleWithLoad, rippleWithLoadConfirmed: rippleWithLoadMeasured,
-		chargerMcbOpen: chargerOpenedForLoad, vocLoading: real ? false : chargerOpenedForLoad && !ticket.vocSnapshot,
+		chargerMcbOpen: chargerOpenedForLoad,
+		vocCurrentDeadbandA: processPolicyNumber('VOC_BASELINE_CAPTURE', 'vocCurrentDeadbandA', configurationNumber('currentDeadbandA', 0.1)),
+		canChangeVocDeadband: isExactActiveProcess('VOC_BASELINE_CAPTURE'),
+		vocLoading: real ? false : chargerOpenedForLoad && !ticket.vocSnapshot,
 		vocError: '', vocSampleId: realVocSample?.sampleId ?? ticket.vocSnapshot?.capturedAt ?? null,
 		vocCapturedAt: realVocSample?.measurementTime ?? (ticket.vocSnapshot ? new Date(ticket.vocSnapshot.capturedAt).toLocaleString() : null),
-		vocStringVoltage: realVocSample?.stringVoltageV ?? ticket.vocSnapshot?.stringVoltageV ?? null, vocCells,
+		vocStringVoltage: realVocSample?.stringVoltageV ?? ticket.vocSnapshot?.stringVoltageV ?? null,
+		vocCurrentA: realVocSample?.domainCurrentA ?? null, vocCells,
 		vocConfirmed: recoveryBaselineAccepted
 	});
 	const stageFiveActions: InitialBaselineStageFiveActions = {
@@ -224,10 +361,11 @@
 		},
 		startRecovery() { if (real) real.onStartProcess('RECOVERY_CHARGE_TO_VBOOST'); else startRecoveryCharge(); },
 		setRecoveryFloatConfirmed(checked) {
-			if (real) { if (checked) real.onEvidence('RECOVERY_FLOAT_STABILITY_REVIEWED'); return; }
+			if (real) { if (checked && realFloatSample) real.onEvidence('RECOVERY_FLOAT_STABILITY_REVIEWED', undefined, undefined, realFloatSample.sampleId); return; }
 			recoveryFloatConfirmed = checked;
 			updateTicket({ recoveryFloatConfirmed: checked });
 		},
+		async changeRecoveryFloatRange(minA, maxA, reason) { if (real) await real.onConfigureActiveFloatRange('RECOVERY_FLOAT_STABILIZATION', minA, maxA, reason); },
 		setResistanceConfirmed(checked) {
 			if (real) { if (checked && realFloatSample) real.onEvidence('CELL_RESISTANCE_SAMPLE_REVIEWED', undefined, undefined, realFloatSample.sampleId); return; }
 			resistanceMeasured = checked;
@@ -237,12 +375,30 @@
 		setFloatCurrentConfirmed(checked) { if (real) { if (checked && realFloatSample?.domainCurrentA != null) real.onEvidence('CHARGER_OUTPUT_CURRENT', Math.abs(realFloatSample.domainCurrentA), 'A', realFloatSample.sampleId); } else { floatCurrentMeasured = checked; updateTicket({ floatCurrentMeasured: checked }); } },
 		setMidpointVoltage(value) { if (!real) { midpointVoltage = value; updateTicket({ midpointVoltage: value }); } },
 		setMidpointConfirmed(checked) { if (real) { if (checked && realFloatSample?.midpointVoltageV != null) real.onEvidence('MIDPOINT_VOLTAGE', realFloatSample.midpointVoltageV, 'V', realFloatSample.sampleId); } else { midpointMeasured = checked; updateTicket({ midpointMeasured: checked }); } },
-		setRippleNoLoad(value) { rippleNoLoad = value; if (!real) updateTicket({ rippleNoLoad: value }); },
-		setRippleNoLoadConfirmed(checked) { if (real) { const value = Number(rippleNoLoad); if (checked && Number.isFinite(value) && value >= 0) real.onEvidence('RIPPLE_BEFORE_LOAD', value, 'V'); } else { rippleNoLoadMeasured = checked; updateTicket({ rippleNoLoadMeasured: checked }); } },
-		setLoadConnected(checked) { if (real) { if (checked) real.onEvidence('LOAD_CONNECTED_CONFIRMATION'); } else { loadMcbClosed = checked; updateTicket({ loadConnectedForRipple: checked }); } },
-		setRippleWithLoad(value) { rippleWithLoad = value; updateTicket({ rippleWithLoad: value }); },
-		setRippleWithLoadConfirmed(checked) { if (real) { if (checked) real.onEvidence('RIPPLE_AFTER_LOAD', Number(rippleWithLoad), 'V'); } else { rippleWithLoadMeasured = checked; updateTicket({ rippleWithLoadMeasured: checked }); } },
+		setRippleNoLoad(value) {
+			rippleNoLoad = value;
+			if (real) rippleNoLoadDirty = true;
+			else updateTicket({ rippleNoLoad: value });
+		},
+		setRippleNoLoadFocused(focused) { rippleNoLoadFocused = focused; },
+		setRippleNoLoadConfirmed(checked) { if (real) { const value = Number(rippleNoLoad); if (checked && Number.isFinite(value) && value >= 0) { rippleNoLoadSubmissionPending = true; real.onEvidence('RIPPLE_BEFORE_LOAD', value, 'V'); } } else { rippleNoLoadMeasured = checked; updateTicket({ rippleNoLoadMeasured: checked }); } },
+		async setLoadConnected(checked) {
+			if (real) {
+				if (checked) await real.onConfirmRecoveryLoadConnected();
+				return;
+			}
+			loadMcbClosed = checked;
+			updateTicket({ loadConnectedForRipple: checked });
+		},
+		setRippleWithLoad(value) {
+			rippleWithLoad = value;
+			if (real) rippleWithLoadDirty = true;
+			else updateTicket({ rippleWithLoad: value });
+		},
+		setRippleWithLoadFocused(focused) { rippleWithLoadFocused = focused; },
+		setRippleWithLoadConfirmed(checked) { if (real) { const value = Number(rippleWithLoad); if (checked && Number.isFinite(value) && value >= 0) { rippleWithLoadSubmissionPending = true; real.onEvidence('RIPPLE_AFTER_LOAD', value, 'V'); } } else { rippleWithLoadMeasured = checked; updateTicket({ rippleWithLoadMeasured: checked }); } },
 		setChargerMcbOpen: confirmChargerOpenedForVoc,
+		async changeVocDeadband(deadbandA, reason) { if (real) await real.onConfigureActiveVocDeadband(deadbandA, reason); },
 		setVocConfirmed(checked) {
 			if (real) { if (checked && realVocSample) real.onEvidence('VOC_BASELINE_CONFIRMATION', undefined, undefined, realVocSample.sampleId); return; }
 			recoveryBaselineAccepted = checked;
@@ -262,7 +418,7 @@
 			const evidence = ([
 				['BATTERY_CHARGER_CONNECTIONS_CHECKED', 'LOAD_MCB_OPEN_CONFIRMED', 'SAFETY_VISUAL_INSPECTION_CONFIRMED', 'OPEN_CIRCUIT_VOLTAGE_REVIEWED'],
 				[], ['CHARGER_MCB_OPEN_FOR_COOLDOWN', 'AMBIENT_TEMPERATURE_REVIEWED', 'COOLDOWN_SAFETY_VALVES_REVIEWED'],
-				['DISCHARGE_PROFILE_REVIEWED', 'TEST_LOAD_CONNECTED', 'DISCHARGE_CUTOFF_REVIEWED'], [],
+				['TEST_LOAD_CONNECTED', 'DISCHARGE_CUTOFF_REVIEWED'], [],
 				['BASELINE_SUMMARY_REVIEWED']
 			] as const)[selectedIndex]?.[index];
 			if (checked && evidence) real.onEvidence(evidence);
@@ -277,15 +433,24 @@
 
 	function processMeasurementNumber(type: string, key: string) {
 		if (!real) return null;
-		const latest = initialBaselineProcess(real, type)?.properties?.latestMeasurement;
+		const latest = initialBaselineProcess(real, type)?.runtime?.latestMeasurement;
 		if (!latest || typeof latest !== 'object' || Array.isArray(latest)) return null;
 		const value = (latest as Record<string, unknown>)[key];
 		return typeof value === 'number' && Number.isFinite(value) ? value : null;
 	}
 
+	function recoveryProcessMeasurementNumber(type: 'RECOVERY_CHARGE_TO_VBOOST' | 'RECOVERY_FLOAT_STABILIZATION', key: 'stringVoltageV' | 'domainCurrentA') {
+		if (!real) return null;
+		const process = initialBaselineProcess(real, type);
+		const completedSample = process?.state === 'COMPLETED' ? finalProcessSample(real, type) : null;
+		const sampleValue = completedSample?.[key];
+		if (typeof sampleValue === 'number' && Number.isFinite(sampleValue)) return sampleValue;
+		return processMeasurementNumber(type, key);
+	}
+
 	function processCheckpointNumber(type: string, key: string) {
 		if (!real) return null;
-		const checkpoint = initialBaselineProcess(real, type)?.properties?.checkpoint;
+		const checkpoint = initialBaselineProcess(real, type)?.runtime?.checkpoint;
 		if (!checkpoint || typeof checkpoint !== 'object' || Array.isArray(checkpoint)) return null;
 		const value = (checkpoint as Record<string, unknown>)[key];
 		return typeof value === 'number' && Number.isFinite(value) ? value : null;
@@ -293,7 +458,7 @@
 
 	function processCheckpointNestedNumber(type: string, parent: string, key: string) {
 		if (!real) return null;
-		const checkpoint = initialBaselineProcess(real, type)?.properties?.checkpoint;
+		const checkpoint = initialBaselineProcess(real, type)?.runtime?.checkpoint;
 		if (!checkpoint || typeof checkpoint !== 'object' || Array.isArray(checkpoint)) return null;
 		const nested = (checkpoint as Record<string, unknown>)[parent];
 		if (!nested || typeof nested !== 'object' || Array.isArray(nested)) return null;
@@ -303,14 +468,47 @@
 
 	function processRuntimeStatus(process: CalibrationProcess | null) {
 		if (!real || !process || (process.state !== 'ACTIVE' && process.state !== 'BLOCKED')) return null;
-		const properties = process.properties ?? {};
-		const blockers = Array.isArray(properties.blockers)
-			? properties.blockers.filter((value): value is string => typeof value === 'string' && value.length > 0)
-			: [];
-		const recommendation = typeof properties.recommendation === 'string'
-			? properties.recommendation
-			: null;
+		const blockers = process.runtime?.blockers.filter((value) => value.length > 0) ?? [];
+		const recommendation = process.runtime?.recommendation ?? null;
 		return blockers.length || recommendation ? { blockers, recommendation } : null;
+	}
+
+	function finiteNumber(value: number | null | undefined) {
+		return typeof value === 'number' && Number.isFinite(value) ? value : null;
+	}
+
+	function lowestLiveCellVoltage() {
+		if (!real) return null;
+		const summaryMinimum = finiteNumber(real.telemetry?.summary.minVoltage);
+		if (summaryMinimum !== null) return summaryMinimum;
+		const values = real.telemetry?.cells.map((cell) => finiteNumber(cell.voltage))
+			.filter((value): value is number => value !== null) ?? [];
+		return values.length ? Math.min(...values) : null;
+	}
+
+	function lowestPersistedCellVoltage() {
+		const values = latestDischargeSample?.cells.map((cell) => finiteNumber(cell.voltageV))
+			.filter((value): value is number => value !== null) ?? [];
+		return values.length ? Math.min(...values) : null;
+	}
+
+	function controlledDischargeStartDisabledReason() {
+		if (!real) return 'A real calibration event is required.';
+		if (real.busy) return 'Wait for the current backend request to finish.';
+		if (!dischargeLoadConnected) return 'Confirm the standard load connection and wait for persisted evidence readback.';
+		if (!controlledDischargeProcess) return 'Backend did not create CONTROLLED_DISCHARGE for this event.';
+		if (controlledDischargeProcess.state !== 'NOT_STARTED') return `CONTROLLED_DISCHARGE is ${controlledDischargeProcess.state}.`;
+		if (!dischargeStageIsAuthoritativeCurrent) return 'Return to the active discharge stage before starting the process.';
+		if (dischargeRevalidationRequired) {
+			return 'OpenEMS restarted while this physical stage was active. Revalidate the charger, load and battery topology before starting discharge.';
+		}
+		if (displayedDischargePhase === 'DISCHARGE') return null;
+		if (displayedDischargePhase !== 'WAITING_FOR_LOAD') return 'The active backend stage is not ready to start discharge.';
+		if (!waitingForLoadCompleteAction) return 'Backend did not return COMPLETE_STAGE for WAITING_FOR_LOAD.';
+		if (!waitingForLoadCompleteAction.enabled) {
+			return waitingForLoadCompleteAction.disabledReason ?? 'Backend has disabled completion of WAITING_FOR_LOAD.';
+		}
+		return null;
 	}
 
 	function processBlockerMessage(blocker: string) {
@@ -334,11 +532,42 @@
 
 	function realProcessPolicyNumber(key: string, fallback: number) {
 		if (!real) return null;
-		const value = initialFloatProcess?.properties?.[key];
+		const value = initialFloatProcess?.configuration?.[key];
 		return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 	}
 
-	function processTemperature(type: 'BOOST_CHARGE_TO_VBOOST' | 'FLOAT_SETTLEMENT_TO_VFLOAT') {
+	function processPolicyNumber(processType: string, key: string, fallback: number) {
+		if (!real) return fallback;
+		const value = initialBaselineProcess(real, processType)?.configuration?.[key];
+		return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+	}
+
+	function isExactActiveProcess(processType: string) {
+		if (!real) return false;
+		const process = initialBaselineProcess(real, processType);
+		return Boolean(process?.state === 'ACTIVE' && process.calibrationStageId === real.event.currentStageId);
+	}
+
+	function dischargeProcessConfigurationNumber<T extends number | null>(key: string, fallback: T) {
+		const value = controlledDischargeProcess?.configuration?.[key];
+		return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+	}
+
+	function dischargeStageForView(currentStage: CalibrationStage | null, stages: CalibrationStage[]) {
+		const stageTypes = new Set(['WAITING_FOR_LOAD', 'DISCHARGE', 'LOAD_DISCONNECT']);
+		if (currentStage && stageTypes.has(currentStage.type)) return currentStage;
+
+		// Stage 4 is one logical UI step backed by three persisted stages. When an
+		// operator reviews it after the workflow has advanced, retain the latest
+		// reached sub-stage instead of branching on the event's unrelated current
+		// stage and rendering an empty panel.
+		return stages.filter((stage) => stageTypes.has(stage.type) && stage.state !== 'NOT_STARTED')
+			.sort((left, right) => right.order - left.order)[0]
+			?? stages.find((stage) => stage.type === 'WAITING_FOR_LOAD')
+			?? null;
+	}
+
+	function processTemperature(type: 'BOOST_CHARGE_TO_VBOOST' | 'FLOAT_SETTLEMENT_TO_VFLOAT' | 'RECOVERY_CHARGE_TO_VBOOST' | 'RECOVERY_FLOAT_STABILIZATION') {
 		if (!real) return null;
 		const process = initialBaselineProcess(real, type);
 		const completedSample = process?.state === 'COMPLETED' ? finalProcessSample(real, type) : null;
@@ -348,6 +577,18 @@
 		if (checkpointTemperature !== null) return checkpointTemperature;
 		const liveTemperature = real.telemetry?.summary.avgTemperature;
 		return typeof liveTemperature === 'number' && Number.isFinite(liveTemperature) ? liveTemperature : null;
+	}
+
+	function effectiveProcessTargetVoltageV(type: 'RECOVERY_CHARGE_TO_VBOOST' | 'RECOVERY_FLOAT_STABILIZATION',
+		checkpointTarget: 'boostStringVoltageV' | 'floatStringVoltageV', nominalTarget: number,
+		nominalCellTarget: number, coefficientKey: 'boostTemperatureCoefficientMvPerCellC' | 'floatTemperatureCoefficientMvPerCellC',
+		defaultCoefficient: number) {
+		const workerTarget = processCheckpointNestedNumber(type, 'targets', checkpointTarget);
+		if (workerTarget !== null) return workerTarget;
+		const averageTemperature = processTemperature(type);
+		if (averageTemperature === null) return nominalTarget;
+		const coefficientMvPerCellC = configurationNumber(coefficientKey, defaultCoefficient);
+		return (nominalCellTarget + coefficientMvPerCellC / 1000 * (averageTemperature - 25)) * cellCount;
 	}
 
 	function processBarWidth(actual: number | null, target: number) {
@@ -490,6 +731,43 @@
 		floatPolicyInputEventVersion = real.event.eventVersion;
 	});
 
+	$effect(() => {
+		if (!real) return;
+		const revision = `${real.event.calibrationEventId}:${real.event.eventVersion}`;
+		if (safetyFloorInputRevision === revision) return;
+		safetyFloorInput = authoritativeSafetyFloor.toFixed(3);
+		maxWrongCurrentDirectionSamplesInput = String(authoritativeMaxWrongCurrentDirectionSamples);
+		safetyFloorInputRevision = revision;
+	});
+
+	$effect(() => {
+		const curveVersionId = real?.event.referenceCurve?.curveVersionId ?? null;
+		if (selectedCurveVersionId === curveVersionId) return;
+		selectedCurveCell = 1;
+		selectedCurveVersionId = curveVersionId;
+	});
+
+	function saveDischargeMonitor() {
+		if (!real || !canConfigureSafetyFloor || safetyFloorError || maxWrongCurrentDirectionSamplesError
+			|| !dischargeMonitorDirty) return;
+		real.onConfigureDischargeMonitor({
+			safetyFloorVoltagePerCell: safetyFloorValue,
+			maxWrongCurrentDirectionSamples: maxWrongCurrentDirectionSamplesValue
+		});
+	}
+
+	function selectCurveCell(cellIndex: number) {
+		if (!real?.event.referenceCurve || !Number.isInteger(cellIndex) || cellIndex < 1
+			|| cellIndex > real.event.referenceCurve.cellCount) return;
+		selectedCurveCell = cellIndex;
+		real.onLoadCurvePoints(cellIndex, 0, CURVE_PAGE_SIZE);
+	}
+
+	function changeCurvePage(offset: number) {
+		if (!real?.event.referenceCurve) return;
+		real.onLoadCurvePoints(selectedCurveCell, Math.max(0, offset), CURVE_PAGE_SIZE);
+	}
+
 	function validateFloatStableSettings() {
 		const settings = parsedFloatStableSettings();
 		if (![settings.durationMinutes, settings.voltageToleranceV, settings.currentMinA, settings.currentMaxA].every(Number.isFinite)) return 'Enter numeric Float-stable settings.';
@@ -519,7 +797,7 @@
 	function createRecoveryCellResistances(): InitialBaselineDemoCellResistance[] {
 		return Array.from({ length: cellCount }, (_, index) => {
 			const cellId = index + 1;
-			return { cellId, resistanceMohm: Number((0.18 + ((cellId * 17 + ticket.stringIndex * 7) % 31) / 100).toFixed(2)) };
+			return { cellId, resistanceUohm: 1798 + ((cellId * 17 + ticket.stringIndex * 7) % 5) };
 		});
 	}
 
@@ -569,13 +847,22 @@
 	}
 
 	function confirmDischargeResult(checked: boolean) {
-		if (real) { if (checked) real.onEvidence('DISCHARGE_CUTOFF_REVIEWED'); return; }
+		if (real) { if (checked && cutoffDischargeSample) real.onEvidence('DISCHARGE_CUTOFF_REVIEWED', undefined, undefined, cutoffDischargeSample.sampleId); return; }
 		dischargeResultRecorded = checked;
+	}
+
+	function confirmDischargeLoadDisconnected(checked: boolean) {
+		if (real) { if (checked) real.onEvidence('TEST_LOAD_DISCONNECTED'); return; }
 	}
 
 	function confirmSummary(checked: boolean) {
 		if (real) { if (checked) real.onEvidence('BASELINE_SUMMARY_REVIEWED'); return; }
 		summaryApproved = checked;
+	}
+
+	function confirmReturnToService(checked: boolean) {
+		if (real) { if (checked) real.onEvidence('RETURN_TO_SERVICE_CONFIRMATION'); return; }
+		returnToServiceApproved = checked;
 	}
 
 	function confirmChargerIsolated(checked: boolean) {
@@ -604,13 +891,24 @@
 	}
 
 	function scheduleDischarge() {
-		if (real) { real.onEvidence('DISCHARGE_PROFILE_REVIEWED'); return; }
 		if (!dischargeLoadConnected) return;
 		dischargeScheduled = true;
 		dischargeStartedAt = Date.now();
 		dischargeResultRecorded = false;
 		dischargedCapacity = ((batteryString?.ratedCapacity ?? 200) * .984).toFixed(1);
 		lowestCellVoltage = dischargeCutoff.toFixed(2);
+	}
+
+	function startControlledDischarge() {
+		real?.onStartControlledDischarge();
+	}
+
+	function completeControlledDischarge() {
+		real?.onCompleteProcess('CONTROLLED_DISCHARGE');
+	}
+
+	function confirmDischargeStopped() {
+		real?.onConfirmDischargeStopped();
 	}
 
 	function startRecoveryCharge() {
@@ -638,6 +936,39 @@
 
 	$effect(() => {
 		if (!real) return;
+		const eventChanged = manualMeasurementEventId !== real.event.calibrationEventId;
+		const noLoadRipple = real.evidence.filter((item) => item.evidenceType === 'RIPPLE_BEFORE_LOAD'
+			&& item.numericValue != null).at(-1) ?? null;
+		const withLoadRipple = real.evidence.filter((item) => item.evidenceType === 'RIPPLE_AFTER_LOAD'
+			&& item.numericValue != null).at(-1) ?? null;
+		if (eventChanged) {
+			manualMeasurementEventId = real.event.calibrationEventId;
+			rippleNoLoad = noLoadRipple?.numericValue == null ? '' : String(noLoadRipple.numericValue);
+			rippleWithLoad = withLoadRipple?.numericValue == null ? '' : String(withLoadRipple.numericValue);
+			rippleNoLoadDirty = false;
+			rippleWithLoadDirty = false;
+			rippleNoLoadSubmissionPending = false;
+			rippleWithLoadSubmissionPending = false;
+			rippleNoLoadEvidenceId = noLoadRipple?.evidenceId ?? null;
+			rippleWithLoadEvidenceId = withLoadRipple?.evidenceId ?? null;
+		} else {
+			const nextNoLoadEvidenceId = noLoadRipple?.evidenceId ?? null;
+			if (nextNoLoadEvidenceId !== rippleNoLoadEvidenceId
+					&& ((!rippleNoLoadDirty && !rippleNoLoadFocused) || rippleNoLoadSubmissionPending)) {
+				rippleNoLoad = noLoadRipple?.numericValue == null ? '' : String(noLoadRipple.numericValue);
+				rippleNoLoadDirty = false;
+				rippleNoLoadSubmissionPending = false;
+				rippleNoLoadEvidenceId = nextNoLoadEvidenceId;
+			}
+			const nextWithLoadEvidenceId = withLoadRipple?.evidenceId ?? null;
+			if (nextWithLoadEvidenceId !== rippleWithLoadEvidenceId
+					&& ((!rippleWithLoadDirty && !rippleWithLoadFocused) || rippleWithLoadSubmissionPending)) {
+				rippleWithLoad = withLoadRipple?.numericValue == null ? '' : String(withLoadRipple.numericValue);
+				rippleWithLoadDirty = false;
+				rippleWithLoadSubmissionPending = false;
+				rippleWithLoadEvidenceId = nextWithLoadEvidenceId;
+			}
+		}
 		if (navigationEventId !== real.event.calibrationEventId || navigationStageId !== real.event.currentStageId) {
 			selectedIndex = initialBaselineStep(real.event);
 			navigationEventId = real.event.calibrationEventId;
@@ -665,15 +996,12 @@
 		dischargeScheduled = initialBaselineProcess(real, 'CONTROLLED_DISCHARGE')?.state !== 'NOT_STARTED';
 		dischargeResultRecorded = hasInitialBaselineEvidence(real, 'DISCHARGE_CUTOFF_REVIEWED');
 		summaryApproved = hasInitialBaselineEvidence(real, 'BASELINE_SUMMARY_REVIEWED');
+		returnToServiceApproved = hasInitialBaselineEvidence(real, 'RETURN_TO_SERVICE_CONFIRMATION');
 		floatCurrent = realFloatSample?.domainCurrentA == null ? '—' : (Math.abs(realFloatSample.domainCurrentA) * 1000).toFixed(1);
 		midpointVoltage = realFloatSample?.midpointVoltageV?.toFixed(3) ?? '—';
 		floatCurrentMeasured = hasInitialBaselineEvidence(real, 'CHARGER_OUTPUT_CURRENT');
 		midpointMeasured = hasInitialBaselineEvidence(real, 'MIDPOINT_VOLTAGE');
 		rippleNoLoadMeasured = hasInitialBaselineEvidence(real, 'RIPPLE_BEFORE_LOAD');
-		const noLoadRipple = real.evidence.filter((item) => item.evidenceType === 'RIPPLE_BEFORE_LOAD' && item.numericValue != null).at(-1);
-		rippleNoLoad = noLoadRipple?.numericValue == null ? '' : String(noLoadRipple.numericValue);
-		const ripple = real.evidence.filter((item) => item.evidenceType === 'RIPPLE_AFTER_LOAD' && item.numericValue != null).at(-1);
-		if (ripple?.numericValue != null) rippleWithLoad = String(ripple.numericValue);
 	});
 
 	onMount(() => {
@@ -768,6 +1096,8 @@
 						{#if boostReached}<label class="charge-confirm"><input type="checkbox" checked={boostConfirmed} onchange={(event) => confirmBoost(event.currentTarget.checked)} /><span><strong>Confirm Vboost reached</strong><small>Measured string voltage has reached the configured target.</small></span></label>{/if}
 						{#if real ? initialFloatProcess?.state !== 'NOT_STARTED' : ticket.boostConfirmedAt !== null}<div class:ready={floatSettled} class="charge-status"><div class="status-head"><div><span>Float charge</span><strong>{floatSettled ? 'Vfloat target reached' : 'Charging and settling to Vfloat'}</strong></div><b>{real ? `${voltageText(displayedFloatVoltage)} V / ${effectiveFloatTargetVoltage.toFixed(1)} V` : `${voltageText(displayedFloatVoltage)} V / ${floatVoltage.toFixed(1)} V`}</b></div>{#if real}<div class="progress float-progress"><i style={`width:${realFloatBarWidth}%`}></i></div><div class="live-charge-metrics"><div><span>Processed string voltage</span><strong>{voltageText(displayedFloatVoltage)} V</strong></div><div><span>Nominal target (25 °C)</span><strong>{floatVoltage.toFixed(1)} V</strong><small>{floatVoltagePerCell.toFixed(3)} V/cell × {cellCount}</small></div><div><span>Effective target</span><strong>{effectiveFloatTargetVoltage.toFixed(1)} V</strong><small>{floatProcessedTemperature === null ? 'Waiting for cell temperature' : `Temperature-compensated at ${floatProcessedTemperature.toFixed(1)} °C`}</small></div></div><p class="live-snapshot-note">The bar is the processed string voltage against the temperature-compensated target. The backend alone confirms the target.</p>{#if initialFloatRuntimeStatus}<div class="process-runtime-warning"><AlertTriangle size={17} /><div><strong>Backend process warning{initialFloatRuntimeStatus.recommendation ? ` · ${initialFloatRuntimeStatus.recommendation}` : ''}</strong>{#each initialFloatRuntimeStatus.blockers as blocker}<span><b>{blocker}</b> — {processBlockerMessage(blocker)}</span>{/each}</div></div>{/if}{:else}<div class="progress float-progress"><i style={`width:${floatSettlingProgress}%`}></i></div>{/if}{#if !floatSettled}<div class="waiting"><i></i> Automatic transition · charger output is regulating to Vfloat</div>{/if}</div>{/if}
 						{#if real ? initialFloatProcess?.state === 'COMPLETED' : ticket.floatStableStartedAt !== null && ticket.floatStableStartedAt !== undefined}<div class:ready={floatReached} class="float-stable"><div class="status-head"><div><span>Float stable mode</span><strong>{floatReached ? 'Stable window complete' : 'Holding within Float range'}</strong></div><b>{floatStableProgress}%</b></div><div class="progress float-progress"><i style={`width:${floatStableProgress}%`}></i></div><div class="float-metrics"><div><span>Current voltage</span><strong>{voltageText(displayedFloatVoltage)} V</strong><small>Target ± {initialFloatVoltageToleranceV.toFixed(1)} V</small></div><div><span>Current charge</span><strong>{currentText(displayedFloatCurrentA)} A</strong><small>{initialFloatCurrentMinA.toFixed(1)}–{initialFloatCurrentMaxA.toFixed(1)} A</small></div><div><span>Stable duration</span><strong>{floatStableElapsedMinutes} / {floatStableDurationMinutes} min</strong><small>{real ? 'Measured by backend worker' : 'Demo time accelerated'}</small></div></div>{#if initialFloatStableWarning}<div class="float-stable-warning"><AlertTriangle size={17} /><div><strong>{initialFloatStableWarning.serverBlocker ? `Server blocker: ${initialFloatStableWarning.serverBlocker}` : 'Float stable window is waiting for readings in range'}</strong><span>{#if !initialFloatStableWarning.voltageAvailable}Live string voltage is unavailable.{:else if !initialFloatStableWarning.voltageInRange}Live voltage {voltageText(displayedFloatVoltage)} V is outside the compensated Vfloat {effectiveFloatTargetVoltage.toFixed(1)} ± {initialFloatVoltageToleranceV.toFixed(1)} V (nominal {floatVoltage.toFixed(1)} V at 25 °C).{/if}{#if !initialFloatStableWarning.currentAvailable} Live charge current is unavailable.{:else if !initialFloatStableWarning.currentInRange} Live current magnitude {currentText(initialFloatStableWarning.currentMagnitude)} A is outside the configured {initialFloatCurrentMinA.toFixed(2)}–{initialFloatCurrentMaxA.toFixed(2)} A range.{/if}</span><small>{initialFloatStableWarning.serverBlocker ? 'The server reported this blocker; correct the live condition and wait for the next readback.' : 'This explanation is derived from live telemetry and the event configuration; the backend remains authoritative.'}</small></div></div>{/if}</div>{/if}
+						{#if canChangeInitialFloatRange}<button class="secondary" onclick={() => initialFloatPolicyEditor = !initialFloatPolicyEditor}>Change Float-current range</button>{/if}
+						{#if initialFloatPolicyEditor && canChangeInitialFloatRange}<section class="runtime-policy-editor"><strong>Change active Float-current range</strong><span>Saving restarts the stable observation window from zero. The process attempt remains active.</span><div><label>Minimum (A)<input type="number" min="0" step="0.01" bind:value={floatCurrentMinInput} /></label><label>Maximum (A)<input type="number" min="0" step="0.01" bind:value={floatCurrentMaxInput} /></label></div><textarea maxlength="512" placeholder="Required reason" bind:value={initialFloatPolicyReason}></textarea><button class="secondary" disabled={!initialFloatPolicyReason.trim() || !Number.isFinite(Number(floatCurrentMinInput)) || !Number.isFinite(Number(floatCurrentMaxInput)) || Number(floatCurrentMinInput) < 0 || Number(floatCurrentMaxInput) < Number(floatCurrentMinInput) || real?.busy} onclick={submitInitialFloatPolicy}>Apply range and restart stable timer</button></section>{/if}
 						{#if floatReached && boostConfirmed}<label class="charge-confirm"><input type="checkbox" checked={floatConfirmed} onchange={(event) => confirmFloat(event.currentTarget.checked)} /><span><strong>Confirm Float condition is stable</strong><small>Review the voltage, current and completed stable window above.</small></span></label>{/if}
 					{/if}
 				</section>
@@ -785,13 +1115,51 @@
 			</section>
 		{:else if selectedIndex === 3}
 			<section class="discharge-workflow">
-				<div class="discharge-controls"><label>Discharge profile<select bind:value={dischargeProfile} disabled={dischargeScheduled}><option value="0.1C10">0.1C10 — 10 h</option><option value="0.2C5">0.2C5 — 5 h</option></select></label><label>Test current (A)<input value={dischargeCurrent.toFixed(1)} readonly /></label><label>Cut-off / cell (VDC)<input value={dischargeCutoff.toFixed(2)} readonly /></label><label>Sampling interval (min)<input type="number" min="1" bind:value={dischargeSamplingMinutes} disabled={dischargeScheduled} /></label></div>
-				<div class="safety-banner"><AlertTriangle size={18} /><div><strong>Stop condition</strong><span>Stop at the first cell reaching {dischargeCutoff.toFixed(2)} V/cell, or sooner if a safety alarm occurs.</span></div></div>
+				<div class="discharge-controls"><label>Discharge profile<select bind:value={dischargeProfile} disabled={Boolean(real) || dischargeScheduled}>{#if real}<option value={real.event.configuration.dischargeMethod === 'C5' ? '0.2C5' : '0.1C10'}>{real.event.configuration.dischargeMethod === 'C5' ? '0.2C5 — 5 h' : '0.1C10 — 10 h'}</option>{:else}<option value="0.1C10">0.1C10 — 10 h</option><option value="0.2C5">0.2C5 — 5 h</option>{/if}</select></label><label>Test current (A)<input value={dischargeCurrent.toFixed(1)} readonly /></label><label>Cut-off / cell (VDC)<input value={dischargeCutoff.toFixed(2)} readonly /></label><label>Sampling interval (wall-clock seconds)<input type="number" value={configuredDischargeSamplingSeconds ?? ''} readonly /><small>{configuredDischargeSamplingSeconds === null ? 'Authoritative cadence unavailable.' : prerequisiteDemoTimeScaleFactor() === 60 ? `${configuredDischargeSamplingSeconds} seconds in 60× demo mode.` : `${configuredDischargeSamplingSeconds} seconds in real-time mode.`}</small></label></div>
+				{#if real}<section class="discharge-safety-settings"><div class="monitor-setting"><div><span>Safety floor / cell (VDC)</span><strong>Stop-warning threshold below cut-off</strong><small>Default is cut-off − 0.10 V.</small></div><label><input type="number" min="0.001" max={dischargeCutoff - 0.001} step="0.001" bind:value={safetyFloorInput} disabled={!canConfigureSafetyFloor} aria-label="Discharge safety floor voltage per cell" /><span>V/cell</span></label></div><div class="monitor-setting"><div><span>Wrong-current tolerance</span><strong>Maximum consecutive wrong-direction samples</strong><small>The configured count is tolerated; the next sample raises PHASE_CURRENT_INCONSISTENT. A valid-direction sample resets the counter.</small></div><label><input type="number" min="1" step="1" bind:value={maxWrongCurrentDirectionSamplesInput} disabled={!canConfigureSafetyFloor} aria-label="Maximum wrong current direction samples" /><span>samples</span></label></div><button class="secondary" disabled={!canConfigureSafetyFloor || Boolean(safetyFloorError) || Boolean(maxWrongCurrentDirectionSamplesError) || !dischargeMonitorDirty} onclick={saveDischargeMonitor}>Save discharge monitor</button>{#if safetyFloorError}<p>{safetyFloorError}</p>{:else if maxWrongCurrentDirectionSamplesError}<p>{maxWrongCurrentDirectionSamplesError}</p>{:else if !canConfigureSafetyFloor}<p>Authoritative monitor: {authoritativeSafetyFloor.toFixed(3)} V/cell safety floor; {authoritativeMaxWrongCurrentDirectionSamples} wrong-current samples allowed.</p>{/if}</section>{/if}
+				<div class="safety-banner"><AlertTriangle size={18} /><div><strong>Stop condition</strong><span>{real ? `Continue until every configured cell reaches ${dischargeCutoff.toFixed(2)} V/cell; stop sooner only if a safety alarm occurs.` : `Stop at the first cell reaching ${dischargeCutoff.toFixed(2)} V/cell, or sooner if a safety alarm occurs.`}</span></div></div>
+					{#if real}
+						{#if displayedDischargePhase === 'WAITING_FOR_LOAD'}
+							<p class="duration-note"><b>Physical preparation:</b> connect the approved test load. Start advances the persisted WAITING_FOR_LOAD stage and starts CONTROLLED_DISCHARGE as two versioned backend mutations. {configuredDischargeSamplingSeconds === null ? 'The authoritative historical-sample cadence is unavailable.' : `Historical samples use the authoritative ${configuredDischargeSamplingSeconds}-second wall-clock cadence.`}</p>
+						<label class="charge-confirm"><input type="checkbox" checked={dischargeLoadConnected} onchange={(event) => confirmDischargeLoad(event.currentTarget.checked)} disabled={real.busy || !dischargeStageIsAuthoritativeCurrent} /><span><strong>Confirm standard load is connected</strong><small>Connect the approved test load before continuing to the discharge stage.</small></span></label>
+					{/if}
+					{#if dischargeLoadConnected || displayedDischargePhase === 'DISCHARGE' || displayedDischargePhase === 'LOAD_DISCONNECT'}
+						<section class="selected-discharge"><header><div><span>Controlled discharge</span><strong>{controlledDischargeProcess?.state ?? 'NOT_STARTED'}{dischargeRecommendation ? ` · ${dischargeRecommendation}` : ''}</strong></div><b>{displayedDischargeCurrent?.toFixed(3) ?? '—'} A · {latestDischargeSample?.rawUsedAh?.toFixed(2) ?? '—'} Ah</b></header>
+							{#if showLiveDischargePreview}<p class="discharge-source-note"><b>Live pre-start preview.</b> These values come from the current BMS snapshot and are not calibration samples. After Start, this panel switches entirely to persisted discharge samples.</p>{/if}
+							<div class="live-charge-metrics"><div><span>{showLiveDischargePreview ? 'Live string voltage' : 'Persisted string voltage'}</span><strong>{displayedDischargeStringVoltage?.toFixed(3) ?? '—'} V</strong></div><div><span>{showLiveDischargePreview ? 'Live lowest cell voltage' : 'Persisted lowest cell voltage'}</span><strong>{displayedDischargeLowestCellVoltage?.toFixed(3) ?? '—'} V</strong></div><div><span>Depth of discharge</span><strong>{latestDischargeSample?.dodPct?.toFixed(2) ?? '—'}%</strong></div></div>
+							{#if dischargeSafety}<div class="all-cells-progress"><div><span>Cells at cut-off</span><strong>{dischargeCrossedCellCount} / {dischargeConfiguredCellCount}</strong></div><div class="progress" role="progressbar" aria-label="Cells reaching cut-off" aria-valuemin="0" aria-valuemax={dischargeConfiguredCellCount} aria-valuenow={dischargeCrossedCellCount}><i style={`width:${dischargeCrossingPercent}%`}></i></div><small>Progress comes from the persisted backend cutoff crossings; it does not complete the process locally.</small></div>{/if}
+							<DischargeTrendChart cutoffPerCell={dischargeCutoff} values={realDischargeTrend} />
+							{#if !latestDischargeSample}<p class="duration-note"><b>Waiting for persisted discharge data.</b> {configuredDischargeSamplingSeconds === null ? 'The authoritative sampling cadence is unavailable.' : `The chart and official discharge metrics appear after the process starts and the ${configuredDischargeSamplingSeconds}-second wall-clock interval elapses.`}</p>{/if}
+						</section>
+						{#if dischargeBlockers.length}<div class="process-runtime-warning"><AlertTriangle size={17} /><div><strong>Backend process blockers</strong>{#each dischargeBlockers as blocker}<span><b>{blocker}</b> — {processBlockerMessage(blocker)}</span>{/each}</div></div>{/if}
+						{#if dischargeSafety?.safetyState === 'LATCHED'}
+							<div class="safety-stop-warning"><ShieldAlert size={22} /><div><strong>Safety floor reached — stop the discharge load now</strong><span>The backend froze official capacity at {dischargeSafety.frozenUsedAh?.toFixed(3) ?? '—'} Ah. Physically disconnect the load, then wait for fresh near-zero current.</span>{#each dischargeSafety.safetyTriggerCells as trigger}<span>Cell #{trigger.cellIndex}: measured {trigger.voltageV.toFixed(3)} V</span>{/each}<button class="secondary warning-text" disabled={real.busy || !dischargeSafety.canConfirmDischargeStopped} onclick={confirmDischargeStopped}>Confirm discharge stopped</button>{#if !dischargeSafety.canConfirmDischargeStopped}<small>Waiting for the backend to confirm fresh near-zero current.</small>{/if}</div></div>
+						{:else if dischargeSafety?.safetyState === 'STOP_CONFIRMED'}
+							<div class="safety-stop-warning confirmed"><ShieldAlert size={22} /><div><strong>Discharge stopped and event blocked</strong><span>Official capacity remains frozen at {dischargeSafety.frozenUsedAh?.toFixed(3) ?? '—'} Ah. Use Redo stage or Abort calibration event.</span></div></div>
+						{/if}
+						{#if dischargeCellStates.length}<section class="cell-cutoff-results"><header><div><span>Per-cell discharge endpoints</span><strong>{dischargeCrossedCellCount} of {dischargeConfiguredCellCount} cells recorded</strong></div>{#if dischargeSafety?.stringSafeUsableCapacityAh != null}<b>Safe capacity {dischargeSafety.stringSafeUsableCapacityAh.toFixed(3)} Ah</b>{/if}</header><div class="cell-cutoff-table-wrap"><table><thead><tr><th>Cell</th><th>Status</th><th>Last voltage</th><th>Cut-off voltage</th><th>Usable capacity</th></tr></thead><tbody>{#each dischargeCellStates as state}<tr><td>#{state.cellIndex}</td><td><span class:passed={state.cutoffReached}>{state.cutoffReached ? 'Reached' : 'Pending'}</span></td><td>{state.lastVoltageV?.toFixed(3) ?? '—'} V</td><td>{state.cutoffVoltageV?.toFixed(3) ?? '—'} V</td><td>{state.cellUsableCapacityAh?.toFixed(3) ?? '—'} Ah</td></tr>{/each}</tbody></table></div>{#if dischargeSafety?.allCellsEndpointAh != null}<footer>All-cells endpoint: <b>{dischargeSafety.allCellsEndpointAh.toFixed(3)} Ah</b></footer>{/if}</section>{/if}
+						{#if real.event.referenceCurve}<section class="reference-curve-result"><header><div><span>Published reference Vcurve</span><strong>Version #{real.event.referenceCurve.curveVersionId} · schema {real.event.referenceCurve.curveSchemaVersion}</strong></div><b>{real.event.referenceCurve.activeBaseline ? 'Active baseline' : 'Published'}</b></header><div class="curve-summary"><div><span>Safe usable capacity</span><strong>{real.event.referenceCurve.stringSafeUsableCapacityAh.toFixed(3)} Ah</strong></div><div><span>All-cells endpoint</span><strong>{real.event.referenceCurve.allCellsEndpointAh.toFixed(3)} Ah</strong></div><div><span>Curve points</span><strong>{real.event.referenceCurve.pointCount}</strong></div><div><span>Published</span><strong>{formatCalibrationTime(real.event.referenceCurve.publishedAt)}</strong></div></div><div class="curve-toolbar"><label>Cell<select value={selectedCurveCell} disabled={real.curvePointsLoading} onchange={(event) => selectCurveCell(Number(event.currentTarget.value))}>{#each Array.from({ length: real.event.referenceCurve.cellCount }, (_, index) => index + 1) as cellIndex}<option value={cellIndex}>Cell #{cellIndex}</option>{/each}</select></label><small>Rated DOD is the acquisition milestone; actual DOD is normalized by the backend using this cell's measured usable capacity.</small></div>{#if real.curvePointsLoading}<p class="duration-note">Loading persisted curve points…</p>{:else if real.curvePointPage && curvePageMatchesSelection}<div class="curve-table-wrap"><table><thead><tr><th>Point</th><th>Rated DOD</th><th>Actual DOD</th><th>Discharged</th><th>Cell voltage</th><th>Temperature</th><th>Resistance</th></tr></thead><tbody>{#each real.curvePointPage.points as point}<tr><td>{point.pointOrder + 1}</td><td>{point.milestonePercent.toFixed(2)}%</td><td>{point.normalizedActualDodPercent.toFixed(4)}%</td><td>{point.dischargedAh.toFixed(3)} Ah</td><td>{point.cellVoltageV.toFixed(3)} V</td><td>{point.cellTemperatureC?.toFixed(1) ?? '—'} °C</td><td>{point.cellResistanceUohm?.toFixed(0) ?? '—'} µΩ</td></tr>{/each}</tbody></table></div><footer><span>{real.curvePointPage.total === 0 ? 'No points' : `${real.curvePointPage.offset + 1}–${Math.min(real.curvePointPage.offset + real.curvePointPage.points.length, real.curvePointPage.total)} of ${real.curvePointPage.total}`}</span><div><button class="secondary" disabled={real.curvePointPage.offset === 0 || real.curvePointsLoading} onclick={() => changeCurvePage(real.curvePointPage!.offset - CURVE_PAGE_SIZE)}>Previous</button><button class="secondary" disabled={real.curvePointPage.offset + real.curvePointPage.points.length >= real.curvePointPage.total || real.curvePointsLoading} onclick={() => changeCurvePage(real.curvePointPage!.offset + CURVE_PAGE_SIZE)}>Next</button></div></footer>{:else}<p class="duration-note">Published curve metadata is available, but no points are loaded for this cell.</p>{/if}</section>{/if}
+						{#if !controlledDischargeProcess}<div class="process-runtime-warning"><AlertTriangle size={17} /><div><strong>Controlled discharge process is unavailable</strong><span>Reload the event and verify that the backend created CONTROLLED_DISCHARGE for this workflow.</span></div></div>{/if}
+						{#if (displayedDischargePhase === 'WAITING_FOR_LOAD' || displayedDischargePhase === 'DISCHARGE') && controlledDischargeProcess?.state === 'NOT_STARTED'}
+							<button class="secondary schedule-discharge" disabled={!canStartControlledDischarge} title={startControlledDischargeDisabledReason ?? undefined} onclick={startControlledDischarge}><Play size={15} />Start discharge process</button>
+							{#if startControlledDischargeDisabledReason}<p class="start-disabled-reason"><AlertTriangle size={15} /><span><b>Start is blocked:</b> {startControlledDischargeDisabledReason}</span></p>{/if}
+							{#if dischargeRevalidationRequired && dischargeRevalidateAction?.enabled}
+								<div class="stage-revalidation-action"><div><strong>Physical-stage revalidation required</strong><span>OpenEMS restarted during this stage. Confirm the physical topology before discharge can start.</span></div><button class="secondary warning-text" disabled={real.busy} onclick={() => requestFooterAction(dischargeRevalidateAction)}>Revalidate physical stage</button></div>
+							{/if}
+						{/if}
+						{#if controlledDischargeProcess?.state === 'ACTIVE' && dischargeRecommendation === 'READY_TO_COMPLETE'}<button class="secondary schedule-discharge" disabled={real.busy || !cutoffDischargeSample} onclick={completeControlledDischarge}>Complete discharge process</button>{/if}
+						{#if controlledDischargeProcess?.state === 'COMPLETED'}<label class="charge-confirm"><input type="checkbox" checked={dischargeResultRecorded} disabled={real.busy || !cutoffDischargeSample} onchange={(event) => confirmDischargeResult(event.currentTarget.checked)} /><span><strong>Confirm persisted discharge result</strong><small>{cutoffDischargeSample ? `Cut-off sample #${cutoffDischargeSample.sampleId}, ${(cutoffDischargeSample.rawUsedAh ?? 0).toFixed(2)} Ah.` : 'Waiting for a valid persisted cut-off sample.'}</small></span></label>{/if}
+						{#if displayedDischargePhase === 'LOAD_DISCONNECT'}
+							<label class="charge-confirm"><input type="checkbox" checked={hasInitialBaselineEvidence(real, 'TEST_LOAD_DISCONNECTED')} disabled={real.busy} onchange={(event) => confirmDischargeLoadDisconnected(event.currentTarget.checked)} /><span><strong>Confirm test load is disconnected</strong><small>Physically isolate the test load before recovery charging.</small></span></label>
+						{/if}
+					{/if}
+				{:else}
 				<label class="charge-confirm"><input type="checkbox" checked={dischargeLoadConnected} onchange={(event) => confirmDischargeLoad(event.currentTarget.checked)} disabled={dischargeScheduled} /><span><strong>Confirm standard load is connected</strong><small>Connect the approved test load before scheduling the discharge event.</small></span></label>
-				{#if !dischargeScheduled}<button class="secondary schedule-discharge" disabled={!dischargeLoadConnected || !Number(dischargeSamplingMinutes)} onclick={scheduleDischarge}><Play size={15} />Schedule discharge event</button>{:else}
+				{#if !dischargeScheduled}<button class="secondary schedule-discharge" disabled={!dischargeLoadConnected} onclick={scheduleDischarge}><Play size={15} />Schedule discharge event</button>{:else}
 					<section class="selected-discharge"><header><div><span>Selected discharge event</span><strong>{dischargeComplete ? 'Cut-off reached / demo' : 'Running / demo'}</strong></div><b>{dischargeCurrent.toFixed(1)} A · {demoDischargedCapacity} Ah</b></header><DischargeTrendChart demo={true} cutoffPerCell={dischargeCutoff} progress={dischargeProgress} />{#if !dischargeComplete}<div class="discharge-running"><i></i><span>Discharging {formatDemoDuration(Math.min(12, Math.floor(dischargeProgress * .12)))} / 00:12 demo</span><b>{demoDischargedCapacity} Ah used</b></div>{/if}</section>
 					{#if dischargeComplete}<div class="discharge-results"><label>Discharged capacity (Ah)<input type="number" min="0" bind:value={dischargedCapacity} /></label><label>Lowest cell voltage (VDC)<input type="number" step="0.01" bind:value={lowestCellVoltage} /></label><label>Stop reason<select bind:value={dischargeStopReason}><option value="CELL_CUTOFF">Cell reached configured cut-off</option><option value="OPERATOR_STOP">Operator stopped test</option><option value="SAFETY_ALARM">Safety alarm</option></select></label></div>
 					<label class="charge-confirm"><input type="checkbox" checked={dischargeResultRecorded} onchange={(event) => confirmDischargeResult(event.currentTarget.checked)} /><span><strong>Confirm discharge result</strong><small>Capacity, lowest cell voltage and stop reason have been recorded.</small></span></label>{/if}
+				{/if}
 				{/if}
 			</section>
 			{:else if selectedIndex === 4}
@@ -799,8 +1167,9 @@
 		{:else if selectedIndex === 5}
 			<section class="summary-workflow">
 				<div class="summary-heading"><div><span>INITIAL BASELINE EVENT</span><strong>{ticket.id}</strong></div><span>Ready for review</span></div>
-				<div class="summary-grid"><article><span>String voltage</span><strong>{summaryValues.stringVoltage} V</strong><small>Float target</small></article><article><span>Midpoint voltage</span><strong>{summaryValues.midpointVoltage} V</strong><small>Baseline</small></article><article><span>Discharged capacity</span><strong>{summaryValues.dischargedCapacity} Ah</strong><small>At cut-off</small></article><article><span>Initial SOH</span><strong>{summaryValues.initialSoh}%</strong><small>From discharge test</small></article><article><span>Lowest cell voltage</span><strong>{summaryValues.lowestCellVoltage} V</strong><small>{summaryValues.stopReason.replaceAll('_', ' ')}</small></article><article><span>Float current</span><strong>{summaryValues.floatCurrent} mA</strong><small>Baseline</small></article><article><span>Cell / block resistance</span><strong>{summaryValues.internalResistance} mΩ</strong><small>Baseline</small></article><article><span>Temperature condition</span><strong>{summaryValues.ambientTemperature} °C</strong><small>Δ {summaryValues.temperatureDelta} °C / ≤ {summaryValues.allowedTemperatureDelta} °C</small></article><article><span>AC ripple</span><strong>{summaryValues.rippleNoLoad} / {summaryValues.rippleWithLoad} V</strong><small>No load / with load</small></article></div>
+				<div class="summary-grid"><article><span>String voltage</span><strong>{summaryValues.stringVoltage} V</strong><small>Float target</small></article><article><span>Midpoint voltage</span><strong>{summaryValues.midpointVoltage} V</strong><small>Baseline</small></article><article><span>Discharged capacity</span><strong>{summaryValues.dischargedCapacity} Ah</strong><small>At cut-off</small></article><article><span>Initial SOH</span><strong>{summaryValues.initialSoh}%</strong><small>From discharge test</small></article><article><span>Lowest cell voltage</span><strong>{summaryValues.lowestCellVoltage} V</strong><small>{summaryValues.stopReason.replaceAll('_', ' ')}</small></article><article><span>Float current</span><strong>{summaryValues.floatCurrent} mA</strong><small>Baseline</small></article><article><span>Cell / block resistance</span><strong>{summaryValues.internalResistance} µΩ</strong><small>Baseline</small></article><article><span>Temperature condition</span><strong>{summaryValues.ambientTemperature} °C</strong><small>Δ {summaryValues.temperatureDelta} °C / ≤ {summaryValues.allowedTemperatureDelta} °C</small></article><article><span>AC ripple</span><strong>{summaryValues.rippleNoLoad} / {summaryValues.rippleWithLoad} V</strong><small>No load / with load</small></article></div>
 				{#if !readOnly}<label class="charge-confirm summary-confirm"><input type="checkbox" checked={summaryApproved} onchange={(event) => confirmSummary(event.currentTarget.checked)} /><span><strong>Confirm Initial Baseline summary</strong><small>I have reviewed the event results and accept this data as the Initial Baseline reference.</small></span></label>{/if}
+				{#if !readOnly}<label class="charge-confirm summary-confirm"><input type="checkbox" checked={returnToServiceApproved} onchange={(event) => confirmReturnToService(event.currentTarget.checked)} /><span><strong>Confirm return to service</strong><small>The battery string is ready to return to normal operation.</small></span></label>{/if}
 			</section>
 		{:else}
 			{#if selectedIndex === 0 && real}
@@ -814,19 +1183,22 @@
 	</fieldset>
 
 	{#if demoComplete}<div class="complete-banner"><CheckCircle2 size={18} /><span>Demo complete. The baseline report is ready for review.</span></div>{/if}
-	{#if !readOnly}<footer class="page-footer"><div class="footer-navigation"><button class="secondary" disabled={selectedIndex === 0} onclick={() => selectedIndex -= 1}>Back</button>{#if real}<button class="secondary" disabled={viewingActiveStep} onclick={() => selectedIndex = activeStepIndex}>Go to active stage</button>{/if}</div><div class="footer-actions">{#if real?.canRedoStage}<button class="secondary danger-text" disabled={real.busy} onclick={() => redoConfirmation = true}>Redo stage</button>{/if}{#if real}{#each real.event.allowedActions.filter((action) => action.actionCode === 'REVALIDATE_STAGE' || action.actionCode === 'ABORT_EVENT') as action}<button class="secondary" class:warning-text={action.intent === 'WARNING'} class:danger-text={action.intent === 'DANGER'} disabled={real.busy || !action.enabled} title={action.disabledReason ?? undefined} onclick={() => requestFooterAction(action)}>{action.label}</button>{/each}{/if}<button class="primary" disabled={!viewingActiveStep || !stepReady || Boolean(real?.busy)} onclick={nextStep}>{selectedIndex === steps.length - 1 ? (real ? 'Save' : 'Finish demo') : 'Next step'}</button></div></footer>{:else}<footer class="page-footer"><span class="history-note">Completed {ticket.completedAt ? new Date(ticket.completedAt).toLocaleString() : ''}</span><button class="primary" onclick={onBack}>Back to events</button></footer>{/if}
+	{#if !readOnly}<footer class="page-footer"><div class="footer-navigation"><button class="secondary" disabled={selectedIndex === 0} onclick={() => selectedIndex -= 1}>Back</button>{#if real}<button class="secondary" disabled={viewingActiveStep} onclick={() => selectedIndex = activeStepIndex}>Go to active stage</button>{/if}</div><div class="footer-actions">{#if real?.canRedoStage}<button class="secondary danger-text" disabled={real.busy} onclick={() => redoConfirmation = true}>Redo stage</button>{/if}{#if real}{#each real.event.allowedActions.filter((action) => action.actionCode === 'ABORT_EVENT' || (dischargeSafety?.safetyState !== 'STOP_CONFIRMED' && action.actionCode === 'REVALIDATE_STAGE')) as action}<button class="secondary" class:warning-text={action.intent === 'WARNING'} class:danger-text={action.intent === 'DANGER'} disabled={real.busy || !action.enabled} title={action.disabledReason ?? undefined} onclick={() => requestFooterAction(action)}>{action.label}</button>{/each}{/if}{#if dischargeSafety?.safetyState !== 'STOP_CONFIRMED'}<button class="primary" disabled={!viewingActiveStep || !stepReady || Boolean(real?.busy)} onclick={nextStep}>{selectedIndex === steps.length - 1 ? (real ? 'Save' : 'Finish demo') : 'Next step'}</button>{/if}</div></footer>{:else}<footer class="page-footer"><span class="history-note">Completed {ticket.completedAt ? new Date(ticket.completedAt).toLocaleString() : ''}</span><button class="primary" onclick={onBack}>Back to events</button></footer>{/if}
 	{#if redoConfirmation && real}<div class="completion-backdrop" role="presentation"><div class="completion-dialog action-dialog" role="dialog" aria-modal="true" aria-labelledby="redo-stage-title"><AlertTriangle size={28} /><h3 id="redo-stage-title">Redo stage</h3><p>This reopens the latest completed stage on the server and resets later stages. Historical audit rows stay unchanged.</p><label>Required reason<input bind:value={redoReason} disabled={real.busy} placeholder="Explain why this stage must be repeated" /></label><div><button class="secondary" disabled={real.busy} onclick={() => { redoConfirmation = false; redoReason = ''; }}>Cancel</button><button class="secondary danger-text" disabled={real.busy || !redoReason.trim()} onclick={() => { real.onRedoStage(redoReason); redoConfirmation = false; redoReason = ''; }}>Confirm redo stage</button></div></div></div>{/if}
 	{#if footerAction && real}<div class="completion-backdrop" role="presentation"><div class="completion-dialog action-dialog" role="dialog" aria-modal="true" aria-labelledby="event-action-title"><AlertTriangle size={28} /><h3 id="event-action-title">{footerAction.label}</h3><p>{footerActionDescription(footerAction)}</p>{#if footerAction.requiresReason}<label>Required reason<input bind:value={footerActionReason} disabled={real.busy} placeholder={footerAction.actionCode === 'ABORT_EVENT' ? 'Explain why this event must be aborted' : 'Explain why this stage must be revalidated'} /></label>{/if}{#if footerAction.requiresAcknowledgement}{#each footerAction.acknowledgementItems as item}<label class="action-ack"><input type="checkbox" disabled={real.busy} checked={footerAcknowledgedItems.includes(item)} onchange={(event) => footerAcknowledgedItems = event.currentTarget.checked ? [...new Set([...footerAcknowledgedItems, item])] : footerAcknowledgedItems.filter((value) => value !== item)} />Acknowledge {item.replaceAll('_', ' ')}</label>{/each}{/if}<div><button class="secondary" disabled={real.busy} onclick={() => footerAction = null}>Cancel</button><button class="secondary" class:warning-text={footerAction.intent === 'WARNING'} class:danger-text={footerAction.intent === 'DANGER'} disabled={real.busy || !actionReady(footerAction)} onclick={confirmFooterAction}>Confirm {footerAction.label}</button></div></div></div>{/if}
 	{#if completionDialog}<div class="completion-backdrop" role="presentation"><div class="completion-dialog" role="dialog" aria-modal="true" aria-labelledby="completion-title"><CheckCircle2 size={28} /><h3 id="completion-title">Initial Baseline completed</h3><p>The event summary has been saved. You can view it again from Events as a read-only record.</p><button class="primary" onclick={onBack}>Return to events</button></div></div>{/if}
 </section>
 
 <style>
+	.runtime-policy-editor{display:grid;gap:10px;padding:14px;border:1px solid #d8e2ef;border-radius:10px;background:#f7f9fc;color:#40516d}.runtime-policy-editor>span{font-size:12px;color:#7b899d}.runtime-policy-editor>div{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.runtime-policy-editor label{display:grid;gap:5px;font-size:11px}.runtime-policy-editor input,.runtime-policy-editor textarea{min-height:37px;padding:8px;border:1px solid #d7dfeb;border-radius:7px;background:#fff;font:inherit}.runtime-policy-editor textarea{min-height:68px;resize:vertical}
 	.baseline-page{width:100%;color:#33425d}.page-head{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:12px}.back-link{display:inline-flex;align-items:center;gap:7px;margin:0 0 12px;padding:0;border:0;color:#4164a8;background:transparent;font:inherit;font-size:13px;cursor:pointer}.back-link:focus-visible,.stepper button:focus-visible,.secondary:focus-visible,.primary:focus-visible{outline:2px solid #1749ad;outline-offset:2px}.eyebrow{display:block;margin-bottom:6px;color:#3860ad;font-size:11px;font-weight:600;letter-spacing:.09em}.page-head h2{margin:0;color:#172b4d;font-size:25px;font-weight:500}.guide-badge{padding:7px 9px;border-radius:7px;color:#4164a8;background:#eef4ff;font-size:11px;font-weight:600;white-space:nowrap}.demo-banner,.complete-banner{display:flex;align-items:center;gap:9px;margin-bottom:16px;padding:11px 13px;border-radius:9px;color:#315e9e;background:#eff6ff;font-size:12px}.complete-banner{margin:16px 0 0;color:#28734b;background:#edf9f1}.stepper{display:grid;grid-template-columns:repeat(6,minmax(132px,1fr));overflow-x:auto;margin-bottom:16px;border:1px solid #edf1f6;border-radius:11px;background:#fff;box-shadow:0 5px 18px rgba(35,54,89,.025)}.stepper button{display:grid;grid-template-columns:25px 1fr;align-items:center;gap:7px;min-width:132px;padding:12px 10px;border:0;border-right:1px solid #edf0f5;color:#718096;background:#fff;font:inherit;text-align:left;cursor:pointer}.stepper button:last-child{border-right:0}.stepper button span{display:grid;width:23px;height:23px;place-items:center;border:1px solid #d7dfeb;border-radius:50%;font-size:11px}.stepper button strong{font-size:11px;font-weight:500;line-height:1.2}.stepper button.active{color:#1749ad;background:#f2f6ff}.stepper button.active span{border-color:#1749ad;color:#fff;background:#1749ad}.workspace-panel{min-inline-size:0;margin:0;padding:22px;border:1px solid #edf1f6;border-radius:12px;background:#fff;box-shadow:0 12px 30px rgba(35,54,89,.055)}.content-heading{display:flex;align-items:center;gap:10px;margin-bottom:18px;color:#315b9f}.content-heading div{display:grid;gap:3px}.content-heading span{color:#7590ba;font-size:10px;font-weight:600;letter-spacing:.08em}.content-heading h3{margin:0;color:#273853;font-size:18px;font-weight:500}.action-card{display:grid;gap:6px;padding:15px 16px;border-radius:10px;color:#294f91;background:#f0f5fd}.action-card span{font-size:10px;font-weight:600;letter-spacing:.06em}.action-card strong{font-size:14px;font-weight:500;line-height:1.5}.content-grid{display:grid;grid-template-columns:1.15fr .85fr;gap:12px;margin-top:12px}.content-grid section,.record-card{padding:15px 16px;border-radius:10px;background:#f7f9fc}.content-grid h4,.record-card h4{margin:0 0 11px;color:#40516d;font-size:12px;font-weight:600}.content-grid ul{display:grid;gap:9px;margin:0;padding:0;list-style:none}.content-grid li{color:#52647e;font-size:13px;line-height:1.4}.content-grid li label{display:flex;align-items:flex-start;gap:8px;cursor:pointer}.content-grid li input{width:16px;height:16px;flex:none;margin:1px 0 0;accent-color:#1749ad}.content-grid li :global(svg){flex:none;margin-top:1px;color:#aab5c4}.content-grid li.complete{color:#3d6c55}.content-grid li.complete :global(svg){color:#4f8a6a}.live-card{background:#f5f8fc!important}.live-head{display:flex;align-items:center;justify-content:space-between;gap:8px}.live-head span{padding:4px 6px;border-radius:999px;color:#28734b;background:#e8f7ee;font-size:9px;font-weight:600}.live-metrics{display:grid;gap:7px}.live-metrics div{display:grid;grid-template-columns:1fr auto;gap:2px 8px;padding:8px 0;border-top:1px solid #e6edf5}.live-metrics span{color:#7b899d;font-size:11px}.live-metrics strong{color:#30415d;font-size:13px;font-weight:500}.live-metrics small{grid-column:1/-1;color:#4e8a68;font-size:10px}.record-card{margin-top:12px}.record-list{display:flex;flex-wrap:wrap;gap:7px}.record-list span{padding:6px 8px;border-radius:6px;color:#526b95;background:#edf3fb;font-size:11px}.page-footer,.footer-navigation,.footer-actions{display:flex;gap:10px}.page-footer{justify-content:space-between;margin-top:16px}.primary,.secondary{display:inline-flex;align-items:center;justify-content:center;min-height:39px;padding:0 14px;border-radius:8px;font:inherit;font-size:14px;font-weight:500;cursor:pointer}.primary{border:0;color:#fff;background:#1749ad}.secondary{border:0;color:#40516f;background:#f4f7fb}.primary:disabled,.secondary:disabled{opacity:.55;cursor:not-allowed}.secondary:hover:not(:disabled){background:#eaf0f8}@media(max-width:1100px){.stepper{grid-template-columns:repeat(6,150px)}}@media(max-width:650px){.page-head{flex-direction:column}.guide-badge{align-self:flex-start}.workspace-panel{padding:16px}.content-grid{grid-template-columns:1fr}.page-footer{gap:10px;flex-direction:column}.footer-navigation,.footer-actions{width:100%}.page-footer button{flex:1}}
 	.charge-workflow{display:grid;gap:11px}.charge-targets{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.charge-targets div{display:grid;gap:5px;padding:13px 14px;border-radius:9px;background:#f5f8fc}.charge-targets span,.charge-status span{color:#718096;font-size:11px}.charge-targets strong{color:#30415d;font-size:16px;font-weight:500}.charge-targets small{color:#7b899d;font-size:10px}.charge-confirm{display:flex;align-items:flex-start;gap:10px;padding:13px 14px;border-radius:9px;color:#52647e;background:#f7f9fc;cursor:pointer}.charge-confirm input{width:17px;height:17px;flex:none;margin:1px 0 0;accent-color:#1749ad}.charge-confirm span{display:grid;gap:3px}.charge-confirm strong{color:#40516d;font-size:13px;font-weight:500}.charge-confirm small{color:#7b899d;font-size:11px;line-height:1.4}.charge-status{display:grid;gap:10px;padding:14px;border-radius:9px;background:#f0f5fd}.charge-status.ready{background:#edf9f1}.status-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.status-head div{display:grid;gap:3px}.status-head strong{color:#294f91;font-size:14px;font-weight:500}.charge-status.ready .status-head strong,.charge-status.ready .status-head b{color:#28734b}.status-head b{color:#315b9f;font-size:13px;font-weight:500}.live-charge-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.live-charge-metrics div{display:grid;gap:3px;padding:9px 10px;border-radius:7px;background:rgba(255,255,255,.6)}.live-charge-metrics span{color:#718096;font-size:10px}.live-charge-metrics strong{color:#294f91;font-size:14px;font-weight:500}.live-charge-metrics small{color:#718096;font-size:10px}.live-snapshot-note,.estimate-note{margin:0;color:#657994;font-size:11px;line-height:1.4}.estimate-head{padding-top:1px}.progress{height:6px;overflow:hidden;border-radius:99px;background:#dce7f8}.progress i{display:block;height:100%;border-radius:inherit;background:#3267c4;transition:width .2s ease}.charge-status .secondary{justify-self:start;min-height:32px;font-size:12px}.waiting{display:flex;align-items:center;gap:7px;color:#5e7598;font-size:12px}.waiting i{width:8px;height:8px;border-radius:50%;background:#4778ce;animation:pulse 1.1s ease-in-out infinite}@keyframes pulse{50%{opacity:.3;transform:scale(.7)}}@media(max-width:650px){.charge-targets,.live-charge-metrics{grid-template-columns:1fr}.status-head{align-items:flex-start;flex-direction:column;gap:5px}}
 	.progressive-checklist{grid-column:1/-1}.progressive-checklist>p{margin:-3px 0 12px;color:#7b899d;font-size:11px}.progressive-checklist li{display:flex;align-items:flex-start;gap:9px;padding:10px 0;border-top:1px solid #e7edf4}.progressive-checklist .item-number{display:grid;width:20px;height:20px;flex:none;place-items:center;border-radius:50%;color:#5875a3;background:#eaf1fb;font-size:10px;font-weight:600}.progressive-checklist li.complete .item-number{color:#fff;background:#4f8a6a}.progressive-checklist li label{flex:1}
 	.float-progress{background:#dceee3}.float-progress i{background:#4f8a6a}.cooldown-progress{background:#dceee3}.cooldown-progress i{background:#4f8a6a}
 	.float-settings{overflow:hidden;border-radius:11px;background:#f6f8fb}.float-settings header{display:flex;justify-content:space-between;gap:12px;padding:13px 14px;border-bottom:1px solid #e6edf5}.float-settings header div{display:grid;gap:3px}.float-settings header span,.float-settings header small{color:#718096;font-size:11px}.float-settings header strong{color:#40516d;font-size:13px;font-weight:500}.float-settings-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;padding:14px}.float-settings-grid label{display:grid;gap:5px;color:#718096;font-size:11px}.float-settings-grid label>div{display:flex;align-items:center;gap:6px}.float-settings-grid input{min-width:0;width:100%;min-height:37px;padding:0 9px;border:1px solid #dce4ef;border-radius:7px;color:#34465f;background:#fff;font:inherit}.settings-error{margin:0;padding:0 14px 12px;color:#a13a32;font-size:11px}.float-stable{display:grid;gap:10px;padding:16px;border-radius:11px;background:#f0f5fd}.float-stable.ready{background:#edf9f1}.float-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}.float-metrics>div{display:grid;gap:4px;padding:10px;border-radius:8px;background:rgba(255,255,255,.72)}.float-metrics span,.float-metrics small{color:#718096;font-size:10px}.float-metrics strong{color:#30415d;font-size:14px;font-weight:500}@media(max-width:650px){.float-settings-grid,.float-metrics{grid-template-columns:1fr}}
-	.discharge-workflow{display:grid;gap:11px}.discharge-controls,.discharge-results{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.discharge-results{grid-template-columns:repeat(3,1fr)}.discharge-controls label,.discharge-results label{display:grid;gap:5px;color:#718096;font-size:11px}.discharge-controls input,.discharge-controls select,.discharge-results input,.discharge-results select{width:100%;min-height:38px;padding:0 10px;border:1px solid #dce4ef;border-radius:7px;color:#34465f;background:#fbfcfe;font:inherit;font-size:13px}.discharge-controls input[readonly]{color:#566983;background:#f3f6fa}.safety-banner{display:flex;align-items:flex-start;gap:9px;padding:12px 14px;border-radius:9px;color:#9d473c;background:#fff5f3}.safety-banner svg{flex:none;margin-top:1px}.safety-banner div{display:grid;gap:3px}.safety-banner strong{font-size:13px;font-weight:500}.safety-banner span{font-size:11px;line-height:1.4}.schedule-discharge{justify-self:start;min-height:35px;font-size:12px}.selected-discharge{overflow:hidden;border-radius:9px;background:#f7f9fc}.selected-discharge>header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px}.selected-discharge>header div{display:grid;gap:3px}.selected-discharge>header span{color:#718096;font-size:11px}.selected-discharge>header strong{color:#28734b;font-size:13px;font-weight:500}.selected-discharge>header b{color:#405a7e;font-size:12px;font-weight:500}.discharge-running{display:flex;align-items:center;gap:8px;padding:11px 14px;border-top:1px solid #e7edf4;color:#607695;font-size:11px}.discharge-running i{width:8px;height:8px;border-radius:50%;background:#4778ce;animation:pulse 1.1s ease-in-out infinite}.discharge-running b{margin-left:auto;color:#3e639e;font-size:12px;font-weight:500}@media(max-width:800px){.discharge-controls{grid-template-columns:1fr 1fr}.discharge-results{grid-template-columns:1fr}}@media(max-width:650px){.discharge-controls{grid-template-columns:1fr}.selected-discharge>header{align-items:flex-start;flex-direction:column}}
+	.discharge-workflow{display:grid;gap:11px}.discharge-controls,.discharge-results{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.discharge-results{grid-template-columns:repeat(3,1fr)}.discharge-controls label,.discharge-results label{display:grid;gap:5px;color:#718096;font-size:11px}.discharge-controls input,.discharge-controls select,.discharge-results input,.discharge-results select{width:100%;min-height:38px;padding:0 10px;border:1px solid #dce4ef;border-radius:7px;color:#34465f;background:#fbfcfe;font:inherit;font-size:13px}.discharge-controls input[readonly]{color:#566983;background:#f3f6fa}.safety-banner{display:flex;align-items:flex-start;gap:9px;padding:12px 14px;border-radius:9px;color:#9d473c;background:#fff5f3}.safety-banner svg{flex:none;margin-top:1px}.safety-banner div{display:grid;gap:3px}.safety-banner strong{font-size:13px;font-weight:500}.safety-banner span{font-size:11px;line-height:1.4}.schedule-discharge{justify-self:start;min-height:35px;font-size:12px}.selected-discharge{overflow:hidden;border-radius:9px;background:#f7f9fc}.selected-discharge>header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px}.selected-discharge>header div{display:grid;gap:3px}.selected-discharge>header span{color:#718096;font-size:11px}.selected-discharge>header strong{color:#28734b;font-size:13px;font-weight:500}.selected-discharge>header b{color:#405a7e;font-size:12px;font-weight:500}.discharge-source-note{margin:0;padding:10px 14px;border-top:1px solid #e7edf4;color:#526c91;background:#edf4ff;font-size:11px;line-height:1.45}.start-disabled-reason{display:flex;align-items:flex-start;gap:7px;margin:0;color:#92531d;font-size:11px;line-height:1.4}.start-disabled-reason :global(svg){flex:none;margin-top:1px}.discharge-running{display:flex;align-items:center;gap:8px;padding:11px 14px;border-top:1px solid #e7edf4;color:#607695;font-size:11px}.discharge-running i{width:8px;height:8px;border-radius:50%;background:#4778ce;animation:pulse 1.1s ease-in-out infinite}.discharge-running b{margin-left:auto;color:#3e639e;font-size:12px;font-weight:500}@media(max-width:800px){.discharge-controls{grid-template-columns:1fr 1fr}.discharge-results{grid-template-columns:1fr}}@media(max-width:650px){.discharge-controls{grid-template-columns:1fr}.selected-discharge>header{align-items:flex-start;flex-direction:column}}
+	.discharge-safety-settings{display:grid;grid-template-columns:1fr 1fr auto;align-items:end;gap:12px;padding:12px 14px;border-radius:9px;background:#f4f7fc}.monitor-setting{display:grid;grid-template-columns:minmax(180px,1fr) minmax(130px,180px);align-items:end;gap:10px}.monitor-setting>div{display:grid;gap:3px}.discharge-safety-settings span,.discharge-safety-settings small{color:#718096;font-size:11px}.discharge-safety-settings strong{color:#40516d;font-size:13px;font-weight:500}.discharge-safety-settings label{display:grid;grid-template-columns:1fr auto;align-items:center;gap:7px}.discharge-safety-settings input,.curve-toolbar select{width:100%;min-height:38px;padding:0 10px;border:1px solid #dce4ef;border-radius:7px;color:#34465f;background:#fff;font:inherit;font-size:13px}.discharge-safety-settings p{grid-column:1/-1;margin:0;color:#9d473c;font-size:11px}.all-cells-progress{display:grid;gap:7px;padding:12px 14px;border-top:1px solid #e7edf4}.all-cells-progress>div:first-child{display:flex;align-items:center;justify-content:space-between;color:#607695;font-size:11px}.all-cells-progress>div:first-child strong{color:#315b9f;font-size:13px}.all-cells-progress .progress{height:6px}.all-cells-progress .progress i{background:#4778ce}.all-cells-progress small{color:#7b899d;font-size:10px}.cell-cutoff-results,.reference-curve-result{overflow:hidden;border:1px solid #e4eaf2;border-radius:9px;background:#fff}.cell-cutoff-results>header,.reference-curve-result>header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;background:#f6f8fb}.cell-cutoff-results>header div,.reference-curve-result>header div{display:grid;gap:3px}.cell-cutoff-results>header span,.reference-curve-result>header span{color:#718096;font-size:11px}.cell-cutoff-results>header strong,.reference-curve-result>header strong{color:#40516d;font-size:13px;font-weight:500}.cell-cutoff-results>header b,.reference-curve-result>header b{color:#28734b;font-size:11px;font-weight:500}.cell-cutoff-table-wrap,.curve-table-wrap{overflow:auto;max-height:360px}.cell-cutoff-results table,.reference-curve-result table{width:100%;border-collapse:collapse;white-space:nowrap;font-size:11px}.cell-cutoff-results th,.cell-cutoff-results td,.reference-curve-result th,.reference-curve-result td{padding:8px 12px;border-top:1px solid #edf1f6;color:#52627a;text-align:right}.cell-cutoff-results th:first-child,.cell-cutoff-results td:first-child,.cell-cutoff-results th:nth-child(2),.cell-cutoff-results td:nth-child(2),.reference-curve-result th:first-child,.reference-curve-result td:first-child{text-align:left}.cell-cutoff-results th,.reference-curve-result th{position:sticky;top:0;color:#718096;background:#f9fafc;font-weight:500}.cell-cutoff-results td span{color:#9a651f}.cell-cutoff-results td span.passed{color:#28734b}.cell-cutoff-results>footer,.reference-curve-result>footer{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 14px;border-top:1px solid #edf1f6;color:#607695;font-size:11px}.curve-summary{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:#e7edf4}.curve-summary div{display:grid;gap:3px;padding:11px 14px;background:#fff}.curve-summary span,.curve-toolbar small{color:#7b899d;font-size:10px}.curve-summary strong{color:#40516d;font-size:13px;font-weight:500}.curve-toolbar{display:grid;grid-template-columns:180px 1fr;align-items:end;gap:12px;padding:11px 14px;border-top:1px solid #edf1f6}.curve-toolbar label{display:grid;gap:4px;color:#718096;font-size:11px}.reference-curve-result>footer>div{display:flex;gap:7px}.reference-curve-result>footer button{min-height:31px;padding:0 10px;font-size:11px}@media(max-width:1050px){.discharge-safety-settings{grid-template-columns:1fr}.discharge-safety-settings>button{justify-self:start}}@media(max-width:800px){.monitor-setting{grid-template-columns:1fr 180px}.curve-summary{grid-template-columns:repeat(2,1fr)}}@media(max-width:650px){.monitor-setting,.curve-toolbar{grid-template-columns:1fr}.cell-cutoff-results>header,.reference-curve-result>header,.reference-curve-result>footer{align-items:flex-start;flex-direction:column}.curve-summary{grid-template-columns:1fr}}
+	.stage-revalidation-action{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px 14px;border:1px solid #ecd9ad;border-radius:9px;color:#7d5726;background:#fff8e9}.stage-revalidation-action>div{display:grid;gap:3px}.stage-revalidation-action strong{font-size:12px;font-weight:600}.stage-revalidation-action span{font-size:11px;line-height:1.4}.stage-revalidation-action button{flex:none}@media(max-width:650px){.stage-revalidation-action{align-items:stretch;flex-direction:column}.stage-revalidation-action button{align-self:flex-start}}
 	.recovery-workflow{display:grid;gap:11px}.baseline-measurements{overflow:hidden;border-radius:9px;background:#f5f8fc}.baseline-measurements header{display:flex;align-items:start;justify-content:space-between;gap:12px;padding:13px 14px;border-bottom:1px solid #e6edf5}.baseline-measurements header div{display:grid;gap:3px}.baseline-measurements header span{color:#718096;font-size:11px}.baseline-measurements header strong{color:#40516d;font-size:13px;font-weight:500}.baseline-measurements header small{padding:4px 7px;border-radius:99px;color:#396b50;background:#e6f5eb;font-size:10px}.baseline-measurement-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;padding:13px 14px}.baseline-measurement-grid label{display:grid;grid-template-columns:1fr 17px;gap:5px 8px;align-items:center;color:#5f6f86;font-size:11px}.baseline-measurement-grid label>span{grid-column:1/-1}.baseline-measurement-grid label input[type=number],.loaded-ripple>input{width:100%;min-height:37px;padding:0 9px;border:1px solid #dce4ef;border-radius:7px;color:#34465f;background:#fff;font:inherit;font-size:13px}.baseline-measurement-grid label input[type=checkbox]{width:16px;height:16px;accent-color:#1749ad}.baseline-measurement-grid label small{grid-column:1/-1;color:#8793a5;font-size:10px}.loaded-ripple{display:grid;grid-template-columns:1fr 115px auto;align-items:end;gap:10px;padding:13px 14px;border-radius:9px;background:#f5f8fc;color:#5f6f86;font-size:11px}.loaded-ripple>span{align-self:center}.loaded-ripple label{display:flex;align-items:center;gap:6px;min-height:37px;white-space:nowrap;font-size:11px}.loaded-ripple label input{width:16px;height:16px;accent-color:#1749ad}@media(max-width:800px){.baseline-measurement-grid{grid-template-columns:1fr}.loaded-ripple{grid-template-columns:1fr 120px}}@media(max-width:650px){.loaded-ripple{grid-template-columns:1fr}}
 	.summary-workflow{display:grid;gap:12px}.summary-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 14px;border-radius:9px;color:#315b9f;background:#f0f5fd}.summary-heading div{display:grid;gap:4px}.summary-heading div span{font-size:10px;font-weight:600;letter-spacing:.07em}.summary-heading strong{font-size:13px;font-weight:500}.summary-heading>span{padding:5px 8px;border-radius:99px;color:#28734b;background:#e5f5eb;font-size:10px;font-weight:500}.summary-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}.summary-grid article{display:grid;gap:4px;padding:12px;border-radius:8px;background:#f7f9fc}.summary-grid span,.summary-grid small{color:#7b899d;font-size:10px}.summary-grid strong{color:#34465f;font-size:15px;font-weight:500}.summary-confirm{background:#f0f5fd}@media(max-width:800px){.summary-grid{grid-template-columns:repeat(2,1fr)}}@media(max-width:500px){.summary-heading{align-items:flex-start;flex-direction:column}.summary-grid{grid-template-columns:1fr}}
 	.stepper button:disabled{cursor:default;opacity:.62}.history-note{align-self:center;color:#7b899d;font-size:12px}.completion-backdrop{position:fixed;inset:0;z-index:50;display:grid;place-items:center;padding:20px;background:rgba(21,39,71,.32)}.completion-dialog{display:grid;justify-items:center;gap:10px;width:min(390px,100%);padding:28px;border-radius:14px;color:#40516d;background:#fff;box-shadow:0 20px 55px rgba(18,35,66,.24);text-align:center}.completion-dialog :global(svg){color:#3d8b5b}.completion-dialog h3{margin:0;color:#263958;font-size:20px;font-weight:500}.completion-dialog p{margin:0;color:#718096;font-size:13px;line-height:1.5}.completion-dialog .primary{margin-top:6px}
@@ -842,4 +1214,5 @@
 	.discharge-controls label,.discharge-results label,.baseline-measurement-grid label{font-weight:400}.discharge-controls input,.discharge-controls select,.discharge-results input,.discharge-results select,.baseline-measurement-grid label input[type=number],.loaded-ripple>input{border-color:transparent;background:#fff;box-shadow:inset 0 0 0 1px #e4eaf2}.discharge-controls input:focus,.discharge-controls select:focus,.discharge-results input:focus,.discharge-results select:focus,.baseline-measurement-grid label input[type=number]:focus,.loaded-ripple>input:focus{outline:none;box-shadow:inset 0 0 0 1px #7e9fd3,0 0 0 3px rgba(50,99,174,.1)}
 	.cooldown-workflow{display:grid;gap:11px}.cooldown-setup{display:grid;grid-template-columns:1fr auto auto auto;align-items:end;gap:12px;padding:14px;border-radius:9px;background:#f4f7fc}.cooldown-setup>div{display:grid;gap:4px}.cooldown-setup span{color:#718096;font-size:11px}.cooldown-setup strong{color:#40516d;font-size:13px;font-weight:500;line-height:1.4}.cooldown-setup label{display:grid;gap:5px}.cooldown-setup label>div{display:flex;align-items:center;gap:6px}.cooldown-setup input{width:66px;min-height:37px;padding:0 9px;border:1px solid #d7dfeb;border-radius:7px;color:#30415d;background:#fff;font:inherit;font-size:13px}.cooldown-setup small{color:#7b899d;font-size:10px}.cooldown-setup .secondary{min-height:37px;font-size:12px}.temperature-status{display:grid;gap:12px;padding:14px;border-radius:9px;background:#edf9f1}.temperature-status.failed{background:#fff4f2}.temperature-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}.temperature-metrics div{display:grid;gap:4px;padding:10px;border-radius:7px;background:rgba(255,255,255,.72)}.temperature-metrics span{color:#718096;font-size:10px}.temperature-metrics strong{color:#30415d;font-size:13px;font-weight:500}.duration-note,.timeout-note{margin:0;color:#6e7d93;font-size:11px;line-height:1.45}.duration-note b{color:#52647e;font-weight:500}.timeout-note{padding:8px 10px;border-radius:7px;color:#a74c3e;background:rgba(255,255,255,.55)}.manual-approval{display:grid;gap:9px;padding:14px;border-radius:9px;color:#815523;background:#fff8ea}.manual-approval strong{font-size:13px;font-weight:500}.manual-approval span{font-size:11px;line-height:1.45}.manual-approval input{width:100%;min-height:37px;padding:0 10px;border:1px solid #e5cf9e;border-radius:7px;color:#40516f;background:#fff;font:inherit;font-size:12px}.exception-confirm{display:flex;align-items:flex-start;gap:8px;padding:9px 10px;border-radius:7px;color:#6f4b20;background:rgba(255,255,255,.58);font-size:11px;line-height:1.4;cursor:pointer}.exception-confirm input{width:15px;height:15px;flex:none;margin:1px 0 0;accent-color:#b67a21}.manual-approval .secondary{justify-self:start;min-height:32px;font-size:12px}@media(max-width:650px){.cooldown-setup{grid-template-columns:1fr;align-items:stretch}.cooldown-setup label{justify-content:start}.temperature-metrics{grid-template-columns:1fr}}
 	.footer-actions{display:flex;justify-content:flex-end;gap:8px}.warning-text{color:#946019}.danger-text{color:#a13a32}.float-stable-warning,.process-runtime-warning{display:flex;align-items:flex-start;gap:9px;padding:11px 12px;border-radius:8px;color:#87541d;background:#fff8e8}.float-stable-warning :global(svg),.process-runtime-warning :global(svg){flex:none;margin-top:1px}.float-stable-warning div,.process-runtime-warning div{display:grid;gap:3px}.float-stable-warning strong,.process-runtime-warning strong{font-size:12px;font-weight:600}.float-stable-warning span,.float-stable-warning small,.process-runtime-warning span{font-size:11px;line-height:1.4}.float-stable-warning small{color:#806b50}.process-runtime-warning span b{font-weight:600}.action-dialog{justify-items:stretch;text-align:left}.action-dialog :global(svg){justify-self:center;color:#a56b22}.action-dialog label{display:grid;gap:5px;color:#52647e;font-size:12px}.action-dialog input:not([type=checkbox]){width:100%;min-height:37px;padding:0 10px;border:1px solid #d7dfeb;border-radius:7px;color:#30415d;background:#fff;font:inherit}.action-dialog>div{display:flex;justify-content:flex-end;gap:8px}.action-dialog .action-ack{display:flex;align-items:flex-start;gap:8px;line-height:1.4}.action-dialog .action-ack input{width:16px;height:16px;margin:0;accent-color:#b67a21}@media(max-width:650px){.footer-actions{width:100%;flex-wrap:wrap}.footer-actions button{flex:1}}
+	.safety-stop-warning{display:flex;align-items:flex-start;gap:10px;padding:15px;border:1px solid #eaa29a;border-radius:9px;color:#8f2922;background:#fff0ee}.safety-stop-warning :global(svg){flex:none}.safety-stop-warning>div{display:grid;gap:6px}.safety-stop-warning strong{font-size:14px}.safety-stop-warning span,.safety-stop-warning small{font-size:11px;line-height:1.45}.safety-stop-warning button{justify-self:start;margin-top:4px}.safety-stop-warning.confirmed{border-color:#e4bd76;color:#805118;background:#fff8e9}
 </style>
