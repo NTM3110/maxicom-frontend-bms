@@ -31,6 +31,7 @@
 	let authReady = $state(false);
 	let currentUser = $state<AppUser | null>(null);
 	let userMenuOpen = $state(false);
+	let calibrationStringIndex = $state(0);
 	let visibleGroups = $derived(deviceConfig ? getNavigationForConfig(deviceConfig) : navigationGroups);
 	let effectiveSidebarCollapsed = $derived(sidebarCollapsed || compactViewport);
 
@@ -51,6 +52,12 @@
 
 	function selectItem(item: NavigationItem) {
 		activeItem = item;
+	}
+
+	function openCalibration(stringIndex: number) {
+		calibrationStringIndex = stringIndex;
+		const item = visibleGroups.flatMap((group) => group.items).find((entry) => entry.id === 'calibration');
+		if (item) activeItem = item;
 	}
 
 	function handleAuthenticated(user: AppUser, password: string) {
@@ -98,7 +105,7 @@
 				</button>
 			{/if}
 			<div class="page-heading">
-				<h1>{deviceConfig?.device.title ?? activeItem.label}</h1>
+				<h1>{activeItem.label}</h1>
 				<p>{deviceConfig?.device.subtitle ?? 'MAXiCom energy management platform'}</p>
 			</div>
 			<div class="topbar-actions">
@@ -124,7 +131,7 @@
 		<main class="content" aria-label="Application content">
 			{#key bmsSessionRevision}
 			{#if activeItem.id === 'dashboard'}
-				<BmsDashboardPage />
+				<BmsDashboardPage onOpenCalibration={openCalibration} />
 			{:else if activeItem.id === 'status'}
 				<RtsStatusPage config={deviceConfig} />
 			{:else if activeItem.id === 'battery-strings'}
@@ -150,7 +157,7 @@
 			{:else if activeItem.id === 'wika'}
 				<DeviceConfigurationPage kind="wika" config={deviceConfig} />
 			{:else if activeItem.id === 'calibration'}
-				<DischargeCalibrationPage />
+				<DischargeCalibrationPage initialStringIndex={calibrationStringIndex} />
 			{:else if activeItem.id === 'assets'}
 				<AssetManagementPage />
 			{:else if activeItem.id === 'alerts'}

@@ -27,6 +27,7 @@
 		type CalibrationStage,
 		type DischargeCurrentDirection
 	} from '$lib/services/bms-api';
+	let { initialStringIndex = 0 }: { initialStringIndex?: number } = $props();
 
 	let strings = $state<BatteryString[]>([]);
 	let selectedStringIndex = $state(0);
@@ -79,7 +80,7 @@
 			const [availableStrings, config] = await Promise.all([listBmsStrings(), getDischargeConfig()]);
 			strings = availableStrings;
 			currentDirection = config.dischargeCurrentDirection;
-			selectedStringIndex = strings[0]?.stringIndex ?? 0;
+			selectedStringIndex = strings.some((item) => item.stringIndex === initialStringIndex) ? initialStringIndex : (strings[0]?.stringIndex ?? 0);
 			initialBaselineTicket = selectedStringIndex ? loadInitialBaselineDemoTicket(selectedStringIndex) : null;
 			if (selectedStringIndex) await loadLatest();
 		} catch (cause) {

@@ -27,7 +27,7 @@ export type NavigationItem = {
 export const navigationGroups: { label?: string; items: NavigationItem[] }[] = [
 	{
 		items: [
-			{ id: 'dashboard', label: 'Dashboard', icon: CircleGauge },
+			{ id: 'dashboard', label: 'Health Monitor', icon: CircleGauge },
 			{ id: 'status', label: 'Status', icon: Activity }
 		]
 	},
