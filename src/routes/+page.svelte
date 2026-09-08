@@ -9,7 +9,7 @@
 	import AssetManagementPage from '$lib/features/bms/AssetManagementPage.svelte';
 	import AccountWorkspace from '$lib/features/system/AccountWorkspace.svelte';
 	import DischargeCalibrationPage from '$lib/features/bms/DischargeCalibrationPage.svelte';
-	import EmailAlertsPage from '$lib/features/bms/EmailAlertsPage.svelte';
+	import AlertsPage from '$lib/features/bms/AlertsPage.svelte';
 	import MaintenancePage from '$lib/features/bms/MaintenancePage.svelte';
 	import SystemInfoPage from '$lib/features/system/SystemInfoPage.svelte';
 	import SerialTcpPage from '$lib/features/connectivity/SerialTcpPage.svelte';
@@ -164,7 +164,7 @@
 			{:else if activeItem.id === 'assets'}
 				<AssetManagementPage />
 			{:else if activeItem.id === 'alerts'}
-				<EmailAlertsPage />
+				<AlertsPage />
 			{:else if activeItem.id === 'maintenance'}
 				<MaintenancePage />
 			{:else if activeItem.id === 'account'}

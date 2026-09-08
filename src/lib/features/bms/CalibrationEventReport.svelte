@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { ArrowLeft } from '@lucide/svelte';
 	import BmsCompactCellVoltageTable from './BmsCompactCellVoltageTable.svelte';
+	import InitialBaselineEventReport from './InitialBaselineEventReport.svelte';
 	import {
 		loadCalibrationHistory,
 		loadCalibrationSamples,
@@ -41,7 +42,7 @@
 			samples = loadedSamples;
 			history = loadedHistory;
 		} catch (cause) {
-			measurementError = cause instanceof Error ? cause.message : 'Unable to load persisted Monthly Inspection measurements.';
+			measurementError = cause instanceof Error ? cause.message : 'Unable to load persisted calibration measurements.';
 		} finally {
 			loadingMeasurements = false;
 		}
@@ -109,15 +110,20 @@
 		</dl>
 	</section>
 
-	<section class="report-section" aria-labelledby="report-stage-audit">
-		<h4 id="report-stage-audit">Stage audit</h4>
-		<div class="table-wrap"><table><thead><tr><th>Stage</th><th>State</th><th>Accepted action</th><th>Actor</th><th>Accepted at</th><th>Result / blocker</th></tr></thead><tbody>
+	<details class="report-section collapsible" aria-labelledby="report-stage-audit">
+		<summary id="report-stage-audit"><span><b>Stage audit</b><small>{event.stages.length} stages · click to expand</small></span><span class="chevron">⌄</span></summary>
+		<div class="details-body table-wrap"><table><thead><tr><th>Stage</th><th>State</th><th>Accepted action</th><th>Actor</th><th>Accepted at</th><th>Result / blocker</th></tr></thead><tbody>
 			{#each event.stages as stage}
 				<tr><td>{stage.order + 1}. {stageLabel(stage)}</td><td>{stage.state}</td><td>{stage.acceptedAction ?? '—'}</td><td>{stage.acceptedActor ?? stage.completedBy ?? '—'}</td><td>{formatCalibrationTime(stage.acceptedAt ?? stage.completedAt)}</td><td>{stage.result ?? stage.blockerCode ?? detail(stage.blockerDetail)}</td></tr>
 			{/each}
 		</tbody></table></div>
-	</section>
+	</details>
 
+	{#if event.eventType === 'INITIAL_BASELINE'}
+		<InitialBaselineEventReport {event} {samples} {history} loading={loadingMeasurements} error={measurementError} />
+	{/if}
+
+	{#if event.eventType === 'MONTHLY_INSPECTION'}
 	<section class="report-section" aria-labelledby="report-monthly-assessment">
 		<div class="measurement-head">
 			<div><h4 id="report-monthly-assessment">Monthly Inspection assessment</h4><p>Persisted automatic Stage 2 checkpoint. Missing values were not recorded by the backend.</p></div>
@@ -191,6 +197,7 @@
 			</tbody></table></div>
 		</section>
 	{/if}
+	{/if}
 
 	{#if event.stages.some((stage) => stage.acceptedReason || stage.acknowledgedGaps.length)}
 		<section class="report-section" aria-labelledby="report-operator-notes">
@@ -202,4 +209,5 @@
 
 <style>
 	.report-page{display:grid;min-width:0;gap:18px}.back{display:inline-flex;align-items:center;justify-self:start;gap:7px;min-height:38px;padding:0 11px;border:1px solid #d7dfeb;border-radius:8px;color:#40516f;background:#fff;font:inherit;font-size:13px;font-weight:600;cursor:pointer}.back:focus-visible{outline:2px solid #1749ad;outline-offset:2px}.report-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.eyebrow{display:block;margin-bottom:6px;color:#3860ad;font-size:11px;font-weight:700;letter-spacing:.09em}.report-head h3{margin:0;color:#273853;font-size:23px}.status{padding:5px 8px;border-radius:6px;color:#39567f;background:#edf3fb;font-size:11px;font-weight:700}.report-section{min-width:0;padding:18px;border:1px solid #e0e7f1;border-radius:12px;background:#fff;box-shadow:0 7px 22px rgba(35,54,89,.04)}.report-section h4{margin:0 0 13px;color:#30415d;font-size:15px}.summary-grid,.measurement-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:0}.summary-grid div,.measurement-grid div{display:grid;gap:5px;padding:10px;border:1px solid #edf1f6;border-radius:8px;background:#f9fbfe}.summary-grid dt,.measurement-grid span{color:#718096;font-size:11px}.summary-grid dd,.measurement-grid strong{margin:0;color:#2e415e;font-size:13px;font-weight:600;overflow-wrap:anywhere}.table-wrap{max-width:100%;overflow-x:auto}table{width:100%;border-collapse:collapse;min-width:780px;font-size:12px}th,td{padding:10px 9px;border-bottom:1px solid #e8edf4;text-align:left;vertical-align:top}th{color:#667893;background:#f8fafd;font-size:11px;font-weight:700}td{color:#3d4f69;overflow-wrap:anywhere}.notes{display:grid;gap:8px}.notes article{display:grid;gap:4px;padding:10px;border:1px solid #edf1f6;border-radius:8px;background:#f9fbfe;font-size:12px}.notes strong{color:#30415d}.notes span,.measurement-head p{color:#667893}.measurement-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.measurement-head h4{margin-bottom:5px}.measurement-head p,.empty-measurements,.measurement-error{margin:0;font-size:12px}.measurement-head>span{padding:4px 7px;border-radius:999px;color:#39567f;background:#edf3fb;font-size:10px;font-weight:700}.measurement-grid{margin-bottom:16px}.measurement-error{color:#b42318}@media(max-width:900px){.summary-grid,.measurement-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:620px){.report-head,.measurement-head{display:grid}.report-section{padding:15px}.summary-grid,.measurement-grid{grid-template-columns:1fr}.measurement-head>span{justify-self:start}}
+	.collapsible{padding:0;overflow:hidden}.collapsible summary{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:17px 18px;color:#30415d;cursor:pointer;list-style:none}.collapsible summary::-webkit-details-marker{display:none}.collapsible summary>span:first-child{display:grid;gap:4px}.collapsible summary b{font-size:15px}.collapsible summary small{color:#718096;font-size:11px;font-weight:400}.collapsible .chevron{font-size:20px;transition:transform .18s ease}.collapsible[open] .chevron{transform:rotate(180deg)}.collapsible[open] summary{border-bottom:1px solid #e8edf4}.collapsible .details-body{padding:18px}
 </style>
