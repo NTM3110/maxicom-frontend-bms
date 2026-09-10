@@ -154,7 +154,7 @@ All methods below follow the existing convention: `params` includes the session 
 The current frontend can continue to use:
 
 - `bms.tools.discharge.create`, `list`, `samples`, `stop`, and `activateBaseline` during migration.
-- `bms.tools.strings.list` for string profile defaults.
+- `bms.strings.list` for string profile defaults.
 
 The existing discharge sample format is insufficient for a baseline report because it exposes aggregate values only.  Add a per-cell snapshot endpoint or embed this in `bms.baseline.getDischargeStatus`:
 

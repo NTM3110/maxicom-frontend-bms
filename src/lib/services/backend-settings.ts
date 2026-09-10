@@ -1,7 +1,7 @@
 import { browser } from '$app/environment';
 
 const STORAGE_KEY = 'maxicom-backend-settings';
-const DEFAULT_BMS_HOST = 'localhost';
+const DEFAULT_BMS_HOST = '127.0.0.1';
 const DEFAULT_RTS_HOST = hostFromUrl(String(import.meta.env.VITE_RTS_DEFAULT_HOST ?? import.meta.env.VITE_RTS_WS_URL ?? ''));
 
 export type BackendSettings = {
@@ -36,6 +36,14 @@ function isLoopbackHost(value: string) {
 	return hostname === 'localhost' || hostname === '::1' || /^127(?:\.\d{1,3}){3}$/.test(hostname);
 }
 
+/** Firefox may prefer IPv6 for localhost while the Edge WebSocket is IPv4-only. */
+function normalizeBmsHost(value: string) {
+	const loopbackCandidate = value.trim().replace(/^\[|\]$/g, '').toLowerCase();
+	if (loopbackCandidate === 'localhost' || loopbackCandidate === '::1') return DEFAULT_BMS_HOST;
+	const host = normalizeHost(value, true);
+	return isLoopbackHost(host) ? DEFAULT_BMS_HOST : host;
+}
+
 export function defaultBackendSettings(): BackendSettings {
 	const pageHost = browser ? window.location.hostname : '127.0.0.1';
 	return {
@@ -52,7 +60,7 @@ export function getBackendSettings(): BackendSettings {
 	try {
 		const value = JSON.parse(stored) as Partial<BackendSettings>;
 		return {
-			bmsHost: value.bmsHost ? normalizeHost(value.bmsHost, true) : defaults.bmsHost,
+			bmsHost: value.bmsHost ? normalizeBmsHost(value.bmsHost) : defaults.bmsHost,
 			rtsHost: value.rtsHost ? normalizeHost(value.rtsHost) : defaults.rtsHost
 		};
 	} catch {
@@ -64,7 +72,7 @@ export function getBackendSettings(): BackendSettings {
 export function saveBackendSettings(settings: BackendSettings, scope: 'all' | 'bms' = 'all') {
 	const current = getBackendSettings();
 	const normalized = {
-		bmsHost: normalizeHost(settings.bmsHost, true),
+		bmsHost: normalizeBmsHost(settings.bmsHost),
 		rtsHost: scope === 'bms' ? current.rtsHost : normalizeHost(settings.rtsHost)
 	};
 	if (browser) localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));

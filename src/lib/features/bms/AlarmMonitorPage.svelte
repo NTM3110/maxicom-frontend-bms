@@ -29,6 +29,7 @@
     const regularAlarms = $derived(alarms.filter((alarm) => alarm.alarm !== 'SENSOR_MODULE_FAILURE'));
     const sensorFrameDetails = $derived(frame?.alarmDetails.filter((detail) => detail.alarm === 'SENSOR_MODULE_FAILURE') ?? []);
     const liveStateUnavailable = $derived(!frame || frame.stale);
+    const unavailableEvaluations = $derived(Object.entries(frame?.alarmEvaluations ?? {}).filter(([, status]) => status === 'UNAVAILABLE').map(([alarm]) => label(alarm)));
     const activeCount = $derived(regularAlarms.filter((alarm) => alarm.conditionActive).length + (sensorFailures.some((alarm) => alarm.conditionActive) ? 1 : 0));
     const clearedCount = $derived(regularAlarms.filter((alarm) => !!alarm.clearedAt).length + (sensorFailures.length > 0 && sensorFailures.every((alarm) => !!alarm.clearedAt) ? 1 : 0));
     const topLevelCount = $derived(regularAlarms.length + (sensorFailures.length ? 1 : 0));
@@ -128,6 +129,10 @@
     function number(value: number | null, suffix = '') {
         return value === null ? '—' : `${value.toLocaleString(undefined, { maximumFractionDigits: 3 })}${suffix}`;
     }
+
+    function evaluationUnavailable(alarm: string) {
+        return liveStateUnavailable || frame?.alarmEvaluations[alarm] === 'UNAVAILABLE';
+    }
 </script>
 
 <section class="page">
@@ -166,6 +171,9 @@
         {#if !frame?.reference}
             <div class="message warning reference-warning"><AlertTriangle size={17} />Monitoring reference unavailable. Complete and publish an Initial Baseline first.</div>
         {/if}
+        {#if unavailableEvaluations.length}
+            <div class="message warning"><AlertTriangle size={17} />Evaluation unavailable: {unavailableEvaluations.join(', ')}. Existing occurrences retain their last known condition; unavailable does not mean cleared.</div>
+        {/if}
 
         <section class="summary-grid" aria-label="Alarm summary">
             <article><BellRing size={20} /><div><span>{liveStateUnavailable ? 'Last known active' : 'Active'}</span><strong>{activeCount}</strong></div></article>
@@ -176,7 +184,7 @@
         <section class="live-card">
             <div class="live-grid">
                 <div><span>Operating mode</span><strong>{frame?.operatingMode ? label(frame.operatingMode.mode) : '—'}</strong><small>{frame?.operatingMode?.quality ?? 'No live frame'}</small></div>
-                <div><span>Snapshot</span><strong>{frame?.snapshotSequence ?? '—'}</strong><small>{date(frame?.capturedAt ?? null)}</small></div>
+                <div><span>Measurement snapshot</span><strong>{frame?.snapshotSequence ?? '—'}</strong><small>{date(frame?.capturedAt ?? null)}{#if frame?.publicationRevision != null} · publication {frame.publicationRevision}{/if}</small></div>
                 <div><span>Current quality</span><strong>{frame?.currentQuality ?? '—'}</strong><small>{!frame ? 'No live frame' : frame.stale ? 'Snapshot is stale' : 'Latest frame'}</small></div>
             </div>
             {#if frame?.reference}
@@ -246,7 +254,7 @@
                     {#each regularAlarms as alarm (alarm.id)}
                         <article class="occurrence" class:condition-active={alarm.conditionActive}>
                             <div class="occurrence-main">
-                                <div class="identity"><span class="status" class:active={alarm.conditionActive}>{alarm.conditionActive ? liveStateUnavailable ? 'LAST KNOWN ACTIVE' : 'ACTIVE' : alarm.status}</span><strong>{label(alarm.alarm)}</strong><small>#{alarm.id} · {alarm.subjectKey}</small></div>
+                                <div class="identity"><span class="status" class:active={alarm.conditionActive}>{alarm.conditionActive ? evaluationUnavailable(alarm.alarm) ? 'LAST KNOWN ACTIVE' : 'ACTIVE' : alarm.status}</span><strong>{label(alarm.alarm)}</strong><small>#{alarm.id} · {alarm.subjectKey}{#if evaluationUnavailable(alarm.alarm)} · evaluation unavailable{/if}</small></div>
                                 <dl>
                                     <div><dt>Raised</dt><dd>{date(alarm.raisedAt)}</dd></div>
                                     <div><dt>Observed</dt><dd>{number(alarm.triggerObservedValue)}</dd></div>
