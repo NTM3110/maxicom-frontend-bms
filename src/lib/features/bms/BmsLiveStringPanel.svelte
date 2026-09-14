@@ -11,7 +11,7 @@
 	let cells=$derived.by(()=>{
 		const returned=new Map(item.telemetry.cells.map(cell=>[cell.id,cell]));
 		return Array.from({length:item.config.cellQty},(_,index)=>returned.get(index+1)??{
-			id:index+1,voltage:null,temperature:null,resistance:null,ir:null,soc:null,soh:null,availabilityWarning:'No telemetry returned'
+			id:index+1,voltage:null,temperature:null,resistance:null,ir:null,soc:null,soh:null,availabilityWarning:'No telemetry returned',socEstimator:null,sohEstimator:null
 		} satisfies BmsCellTelemetry);
 	});
 	let cellGroups=$derived.by(()=>{const split=Math.ceil(cells.length/2);return[cells.slice(0,split),cells.slice(split)]});
@@ -34,6 +34,14 @@
 		if(telemetry.calculation.unavailableTaCellIds.length)return `TA unavailable: cells ${telemetry.calculation.unavailableTaCellIds.join(', ')}`;
 		if(!telemetry.calculation.calculatorAvailable)return 'SoC / SoH calculator is not active.';
 		return '';
+	});
+	let estimatorMessage=$derived.by(()=>{
+		const provenance=item.telemetry.summary.sohEstimator;
+		if(!provenance)return'';
+		if(provenance.quality==='AUTHORITATIVE')return provenance.note??'SoH uses the published Initial Baseline reference.';
+		if(provenance.state==='ACTIVE_INITIAL_BASELINE'||provenance.quality==='PROVISIONAL')return provenance.note??'Initial Baseline is in progress; this SoH is provisional and not authoritative.';
+		if(provenance.method==='RESISTANCE_ESTIMATE'||provenance.state==='NO_REFERENCE')return provenance.note??'SoH is estimated from resistance. Complete and publish an Initial Baseline for authoritative capacity-based SoH.';
+		return provenance.note??(provenance.quality==='UNAVAILABLE'?'SoH estimator data is unavailable.':'');
 	});
 
 	function value(input:number|null|undefined,digits=1){return input===null||input===undefined?'—':input.toFixed(digits)}
@@ -83,6 +91,7 @@
 			<span>Snapshot {item.telemetry.calculation.snapshotSequence??'N/A'} · Updated {snapshot}</span>
 		</div>
 		{#if diagnosticMessage}<div class="status-note warning" title={diagnosticMessage}>{diagnosticMessage}</div>{/if}
+		{#if estimatorMessage}<div class:warning={item.telemetry.summary.sohEstimator?.quality!=='AUTHORITATIVE'} class="status-note" title={estimatorMessage}>{estimatorMessage}</div>{/if}
 	</section>
 
 	<section class="string-data">
