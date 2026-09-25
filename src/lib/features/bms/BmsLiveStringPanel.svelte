@@ -2,10 +2,10 @@
 	import { BatteryCharging, ChevronLeft, ChevronRight, Download } from '@lucide/svelte';
 	import BmsActiveCalibrationStatus from './BmsActiveCalibrationStatus.svelte';
 	import BmsLiveCellChart from './BmsLiveCellChart.svelte';
-	import { exportBmsStringRangeUrl, type BmsCellTelemetry, type BmsDashboardItem, type CalibrationEventDetail } from '$lib/services/bms-api';
+	import { exportBmsStringRangeUrl, type BmsAlarmOccurrence, type BmsCellTelemetry, type BmsDashboardItem, type CalibrationEventDetail } from '$lib/services/bms-api';
 
 	type CellMode='voltage'|'temperature'|'soc';
-	let { item, calibration = null, onOpenCalibration = () => undefined }: { item:BmsDashboardItem; calibration?:CalibrationEventDetail|null; onOpenCalibration?:()=>void }=$props();
+	let { item, calibration = null, alarmOccurrences = null, onOpenCalibration = () => undefined }: { item:BmsDashboardItem; calibration?:CalibrationEventDetail|null; alarmOccurrences?:BmsAlarmOccurrence[]|null; onOpenCalibration?:()=>void }=$props();
 	let tab=$state<CellMode>('voltage');
 	let metricScroller:HTMLDivElement;
 	let cells=$derived.by(()=>{
@@ -17,11 +17,13 @@
 	let cellGroups=$derived.by(()=>{const split=Math.ceil(cells.length/2);return[cells.slice(0,split),cells.slice(split)]});
 	let apiCells=$derived(item.telemetry.cells.filter(cell=>hasMeasurement(cell)));
 	let dcLevel=$derived(item.config.cellQty<=55?'110 V DC':'220 V DC');
-	let alarmCount=$derived(cells.filter(cell=>alarmReasons(cell).length>0).length);
+	let activeAlarms=$derived(alarmOccurrences?.filter(alarm=>alarm.conditionActive)??[]);
+	let alarmStateUncertain=$derived(!item.telemetry.monitoring||item.telemetry.monitoring.stale);
+	let alarmCount=$derived(activeAlarms.filter(alarm=>alarm.alarm!=='SENSOR_MODULE_FAILURE').length+(activeAlarms.some(alarm=>alarm.alarm==='SENSOR_MODULE_FAILURE')?1:0));
 	let offlineCount=$derived(cells.filter(cell=>!!cell.availabilityWarning||!hasMeasurement(cell)).length);
 	let onlineCount=$derived(Math.max(0,cells.length-offlineCount));
 	let stringDisconnected=$derived(!item.telemetry.active||item.telemetry.calculation.snapshotStale||[item.telemetry.summary.avgVoltage,item.telemetry.summary.avgResistance,item.telemetry.summary.stringVoltage,item.telemetry.summary.stringCurrent,item.telemetry.summary.avgTemperature].every(input=>input===null));
-	let stringTone=$derived(alarmCount>0?'alarm':stringDisconnected?'offline':'normal');
+	let stringTone=$derived(alarmOccurrences===null?'unknown':alarmCount>0?'alarm':stringDisconnected?'offline':'normal');
 	let snapshot=$derived(item.telemetry.calculation.snapshotTimestamp?new Date(item.telemetry.calculation.snapshotTimestamp).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}):'N/A');
 	let readinessTone=$derived(item.readiness?.complete?'normal':item.readiness?'pending':'offline');
 	let readinessLabel=$derived(item.readiness?.complete?'Ready':item.readiness?'Starting':'Not reported');
@@ -46,16 +48,9 @@
 
 	function value(input:number|null|undefined,digits=1){return input===null||input===undefined?'—':input.toFixed(digits)}
 	function hasMeasurement(cell:BmsCellTelemetry){return[cell.voltage,cell.temperature,cell.resistance,cell.ir,cell.soc,cell.soh].some(input=>input!==null)}
-	function alarmReasons(cell:BmsCellTelemetry){
-		const config=item.config,reasons:string[]=[];
-		if(cell.resistance!==null&&config.highResistanceThreshold>0&&cell.resistance>=config.highResistanceThreshold)reasons.push('High internal resistance');
-		if(cell.temperature!==null&&config.highTemperatureThreshold>0&&cell.temperature>=config.highTemperatureThreshold)reasons.push('High temperature');
-		if(cell.voltage!==null&&config.lowVoltageThreshold>0&&cell.voltage<=config.lowVoltageThreshold)reasons.push('Low voltage');
-		if(cell.voltage!==null&&config.highVoltageThreshold>0&&cell.voltage>=config.highVoltageThreshold)reasons.push('High voltage');
-		return reasons;
-	}
-	function cellTone(cell:BmsCellTelemetry){return cell.availabilityWarning||!hasMeasurement(cell)?'offline':alarmReasons(cell).length?'alarm':'normal'}
-	function cellTitle(cell:BmsCellTelemetry){return cell.availabilityWarning??(!hasMeasurement(cell)?'No API data':alarmReasons(cell).join(', ')||'Normal')}
+	function alarmReasons(cell:BmsCellTelemetry){return activeAlarms.filter(alarm=>alarm.cellIndex===cell.id).map(alarm=>alarm.alarm.toLowerCase().replaceAll('_',' '))}
+	function cellTone(cell:BmsCellTelemetry){return alarmOccurrences===null?'unknown':alarmReasons(cell).length?'alarm':cell.availabilityWarning||!hasMeasurement(cell)?'offline':'normal'}
+	function cellTitle(cell:BmsCellTelemetry){return alarmOccurrences===null?'Alarm status unavailable':alarmReasons(cell).length?`${alarmStateUncertain?'Last known active: ':'Active: '}${alarmReasons(cell).join(', ')}`:cell.availabilityWarning??(!hasMeasurement(cell)?'No API data':'Normal')}
 	function rangeLabel(group:BmsCellTelemetry[]){return group.length?`Cells ${group[0].id}–${group[group.length-1].id}`:'No cells'}
 	function cellPower(cell:BmsCellTelemetry){const current=item.telemetry.summary.stringCurrent;return cell.voltage===null||current===null?null:cell.voltage*current}
 	function firstValue(cell:BmsCellTelemetry){return tab==='voltage'?value(cell.voltage,3):tab==='temperature'?value(cell.temperature,1):value(cell.soc,1)}
@@ -76,7 +71,7 @@
 	{#if calibration}<BmsActiveCalibrationStatus event={calibration} {item} onOpen={onOpenCalibration}/>{/if}
 
 	<section class="status-panel">
-		<header><h3>String status</h3><span class={`overall-status ${stringTone}`}><i></i>{stringTone==='alarm'?`${alarmCount} alarm${alarmCount===1?'':'s'}`:stringTone==='offline'?'No telemetry':'Live API'}</span></header>
+		<header><h3>String status</h3><span class={`overall-status ${stringTone}`}><i></i>{stringTone==='unknown'?'Alarm status unavailable':stringTone==='alarm'?`${alarmCount} ${alarmStateUncertain?'last known active':'active'} alarm${alarmCount===1?'':'s'}`:stringTone==='offline'?'No telemetry':'Live API'}</span></header>
 		<div class="status-channels">
 			<div class:live={channelAvailable(item.telemetry.summary.avgVoltage)}><span>Cell voltage</span><strong><i></i>{channelAvailable(item.telemetry.summary.avgVoltage)?'On':'Off'}</strong></div>
 			<div class:live={channelAvailable(item.telemetry.summary.avgResistance)}><span>Resistance</span><strong><i></i>{channelAvailable(item.telemetry.summary.avgResistance)?'On':'Off'}</strong></div>
@@ -121,7 +116,7 @@
 
 	<div class="cell-section">
 		<header class="cell-section-title"><h3>Cell Data</h3><span>{cells.length} cells</span></header>
-		<div class="cell-toolbar"><nav class="tabs" aria-label="Cell measurement"><button class:active={tab==='voltage'} onclick={()=>tab='voltage'}>Voltage / Resistance</button><button class:active={tab==='temperature'} onclick={()=>tab='temperature'}>Temperature / Power</button><button class:active={tab==='soc'} onclick={()=>tab='soc'}>SOC / SOH</button></nav><div class="legend"><span><i class="normal"></i>Normal</span><span><i class="alarm"></i>Alarm</span><span><i class="offline"></i>Offline</span></div></div>
+		<div class="cell-toolbar"><nav class="tabs" aria-label="Cell measurement"><button class:active={tab==='voltage'} onclick={()=>tab='voltage'}>Voltage / Resistance</button><button class:active={tab==='temperature'} onclick={()=>tab='temperature'}>Temperature / Power</button><button class:active={tab==='soc'} onclick={()=>tab='soc'}>SOC / SOH</button></nav><div class="legend"><span><i class="normal"></i>Normal</span><span><i class="alarm"></i>Alarm</span><span><i class="offline"></i>Offline / unavailable</span></div></div>
 		{#if cells.length}
 			<div class="cell-scroll">
 				<div class="cell-columns">
@@ -157,4 +152,5 @@
 	@container(max-width:620px){.status-channels{grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 0}.status-channels>div:nth-child(3){border-right:0}.status-meta{grid-template-columns:1fr 1fr;gap:7px 10px;padding-top:8px;padding-bottom:8px}.status-meta>span:last-child{grid-column:1/-1}.cell-toolbar{align-items:stretch;flex-direction:column}.tabs{display:grid;width:100%;grid-template-columns:repeat(3,minmax(0,1fr))}.tabs button{padding:0 7px}.legend{align-self:flex-end}.cell-columns{grid-template-columns:1fr}}
 	@container(max-width:470px){.tabs{grid-template-columns:1fr}.tabs button{font-size:12px}.metric-carousel{grid-template-columns:34px minmax(0,1fr) 34px}.metric-arrow{width:26px;height:26px}.metric-card{flex-basis:128px}}
 	@media(max-width:680px){.string-head{align-items:flex-start;flex-direction:column}.head-actions{width:100%;justify-content:space-between}.cell-columns{grid-template-columns:1fr}.cell-scroll{max-height:280px}.legend{flex-wrap:wrap}}
+	.overall-status.unknown{color:#806127;background:#fff9eb}.overall-status.unknown i,.cell-group tr.unknown td:first-child i{background:#d9a441}.cell-group tr.unknown td{color:#806127;background:#fffdf5}
 </style>

@@ -2,9 +2,10 @@
     import { onMount } from 'svelte';
     import { AlertTriangle, BellRing, RefreshCw, ShieldAlert } from '@lucide/svelte';
     import {
-        getBmsMonitoring,
+        getBmsStringTelemetry,
         hasBmsSession,
         listBmsMonitoringAlarms,
+        listOpenBmsMonitoringAlarms,
         listBmsStrings,
         type BatteryString,
         type BmsAlarmOccurrence,
@@ -22,6 +23,7 @@
     let refreshing = $state(false);
     let error = $state('');
     let frameError = $state('');
+    let alarmListUnavailable = $state(false);
     let lastUpdatedAt = $state<Date | null>(null);
     let refreshPromise: Promise<void> | null = null;
 
@@ -71,26 +73,33 @@
     async function runRefresh() {
         const requestedStringKey = selectedStringKey;
         const requestedViewMode = viewMode;
+        const selectedString = strings.find((item) => item.id === requestedStringKey);
+        if (!selectedString) return;
         refreshing = true;
         error = '';
         frameError = '';
         const [frameResult, alarmResult] = await Promise.allSettled([
-            getBmsMonitoring(requestedStringKey),
-            listBmsMonitoringAlarms({ stringKey: requestedStringKey, includeCleared: requestedViewMode === 'history', limit: 200 })
+            getBmsStringTelemetry(selectedString.stringIndex),
+            requestedViewMode === 'active'
+                ? listOpenBmsMonitoringAlarms(requestedStringKey)
+                : listBmsMonitoringAlarms({ stringKey: requestedStringKey, includeCleared: true, limit: 200 })
         ]);
         if (requestedStringKey !== selectedStringKey || requestedViewMode !== viewMode) {
             refreshing = false;
             return;
         }
         if (frameResult.status === 'fulfilled') {
-            frame = frameResult.value;
+            frame = frameResult.value.monitoring;
         } else {
             frame = null;
             frameError = message(frameResult.reason);
         }
         if (alarmResult.status === 'fulfilled') {
             alarms = alarmResult.value;
+            alarmListUnavailable = false;
         } else {
+            alarms = [];
+            alarmListUnavailable = true;
             error = message(alarmResult.reason);
         }
         lastUpdatedAt = new Date();
@@ -101,6 +110,7 @@
         selectedStringKey = (event.currentTarget as HTMLSelectElement).value;
         frame = null;
         alarms = [];
+        alarmListUnavailable = false;
         await refresh(true);
     }
 
@@ -108,6 +118,7 @@
         if (viewMode === next) return;
         viewMode = next;
         alarms = [];
+        alarmListUnavailable = false;
         await refresh(true);
     }
 
@@ -168,7 +179,9 @@
     {:else if !strings.length}
         <section class="state">No battery string is configured.</section>
     {:else}
-        {#if !frame?.reference}
+        {#if !frame}
+            <div class="message warning reference-warning"><AlertTriangle size={17} />Live monitoring metadata unavailable. Persisted alarm occurrences remain available.</div>
+        {:else if !frame.reference}
             <div class="message warning reference-warning"><AlertTriangle size={17} />Monitoring reference unavailable. Complete and publish an Initial Baseline first.</div>
         {/if}
         {#if unavailableEvaluations.length}
@@ -176,9 +189,9 @@
         {/if}
 
         <section class="summary-grid" aria-label="Alarm summary">
-            <article><BellRing size={20} /><div><span>{liveStateUnavailable ? 'Last known active' : 'Active'}</span><strong>{activeCount}</strong></div></article>
-            <article><ShieldAlert size={20} /><div><span>Cleared history</span><strong>{clearedCount}</strong></div></article>
-            <article><ShieldAlert size={20} /><div><span>{liveStateUnavailable ? 'Last known alarm mask' : 'Alarm mask'}</span><strong>{frame ? `${frame.alarmMask} / 0x${frame.alarmMask.toString(16).toUpperCase()}` : '—'}</strong></div></article>
+            <article><BellRing size={20} /><div><span>{liveStateUnavailable ? 'Last known active' : 'Active'}</span><strong>{alarmListUnavailable ? '—' : activeCount}</strong></div></article>
+            <article><ShieldAlert size={20} /><div><span>Cleared history</span><strong>{alarmListUnavailable ? '—' : clearedCount}</strong></div></article>
+            <article><ShieldAlert size={20} /><div><span>{liveStateUnavailable ? 'Last known evaluation mask' : 'Live evaluation mask'}</span><strong>{frame ? `${frame.alarmMask} / 0x${frame.alarmMask.toString(16).toUpperCase()}` : '—'}</strong></div></article>
         </section>
 
         <section class="live-card">
@@ -205,7 +218,9 @@
 
         <section class="alarms-card">
             <header><div><h3>{viewMode === 'active' ? 'Open alarm occurrences' : 'Alarm history'}</h3><p>{topLevelCount} top-level alarm row{topLevelCount === 1 ? '' : 's'} ({alarms.length} persisted occurrence{alarms.length === 1 ? '' : 's'}); {activeCount} condition{activeCount === 1 ? '' : 's'} currently {liveStateUnavailable ? 'last known active' : 'active'}.</p></div></header>
-            {#if refreshing && !alarms.length}
+            {#if alarmListUnavailable}
+                <div class="state compact">Persisted alarm occurrences are unavailable.</div>
+            {:else if refreshing && !alarms.length}
                 <div class="state compact">Loading occurrences…</div>
             {:else if !alarms.length}
                 <div class="state compact">{viewMode === 'active' ? 'No active alarm occurrence.' : 'No alarm history has been recorded.'}</div>

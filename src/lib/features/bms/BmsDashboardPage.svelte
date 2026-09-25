@@ -2,25 +2,34 @@
 	import { Activity, Camera, Home, Play, RefreshCw, Thermometer, X } from '@lucide/svelte';
 	import { onMount } from 'svelte';
 	import BmsLiveStringPanel from './BmsLiveStringPanel.svelte';
-	import { createCalibrationEvent, getBmsDashboardSnapshot, getCalibrationEvent, getDischargeConfig, hasBmsSession, listCalibrationEvents, startCalibrationEvent, type BmsDashboardItem, type CalibrationEventDetail, type CalibrationEventType, type DischargeCurrentDirection } from '$lib/services/bms-api';
+	import { createCalibrationEvent, getBmsDashboardSnapshot, getCalibrationEvent, getDischargeConfig, hasBmsSession, listCalibrationEvents, listOpenBmsMonitoringAlarms, startCalibrationEvent, type BmsAlarmOccurrence, type BmsDashboardItem, type CalibrationEventDetail, type CalibrationEventType, type DischargeCurrentDirection } from '$lib/services/bms-api';
 	import { BMS_ASSET_PROFILE_EVENT, emptyBmsSiteProfile, loadBmsAssetProfile, type BmsSiteProfile } from '$lib/services/bms-asset-profile';
 
 	let { onOpenCalibration = (_stringIndex:number,_eventId=0) => undefined }: { onOpenCalibration?: (stringIndex:number,eventId?:number) => void } = $props();
 	let site=$state<BmsSiteProfile>(emptyBmsSiteProfile());
 	let cameraEnabled=$state(false),items=$state<BmsDashboardItem[]>([]),loading=$state(false),error=$state('');
+	let alarmsByString=$state<Record<string,BmsAlarmOccurrence[]|null>>({});
+	let alarmError=$state('');
 	let activeCalibrations=$state<CalibrationEventDetail[]>([]);
 	let calibrateOpen=$state(false),creatingCalibration=$state(false),calibrationCreateError=$state(''),calibrationStringIndex=$state(0);
 	let calibrationType=$state<Extract<CalibrationEventType,'INITIAL_BASELINE'|'MONTHLY_INSPECTION'>>('INITIAL_BASELINE');
 	let currentDirection=$state<DischargeCurrentDirection>('NEGATIVE');
+	let loadPromise:Promise<void>|null=null;
 	let alarmStrings=$derived(items.filter(item=>statusFor(item)==='alarm').length);
 	let offlineStrings=$derived(items.filter(item=>statusFor(item)==='offline').length);
+	let unknownAlarmStrings=$derived(items.filter(item=>statusFor(item)==='unknown').length);
 	let selectedOpenCalibration=$derived(activeCalibrations.find(event=>stringIndexFor(event)===calibrationStringIndex)??null);
 
 	onMount(()=>{site=loadBmsAssetProfile().site;const updateSite=()=>site=loadBmsAssetProfile().site;window.addEventListener(BMS_ASSET_PROFILE_EVENT,updateSite);void load();const timer=setInterval(()=>void load(false),15000);return()=>{clearInterval(timer);window.removeEventListener(BMS_ASSET_PROFILE_EVENT,updateSite)}});
-	async function load(showActivity=true){
-		if(!hasBmsSession()){items=[];activeCalibrations=[];error='Connecting to the BMS platform…';return}
+	function load(showActivity=true):Promise<void>{
+		if(loadPromise)return loadPromise;
+		loadPromise=runLoad(showActivity).finally(()=>{loadPromise=null});
+		return loadPromise;
+	}
+	async function runLoad(showActivity:boolean){
+		if(!hasBmsSession()){items=[];alarmsByString={};activeCalibrations=[];error='Connecting to the BMS platform…';return}
 		if(showActivity)loading=true;
-		try{const data=await getBmsDashboardSnapshot();items=data;const[eventLists,dischargeConfig]=await Promise.all([Promise.all(data.map(item=>listCalibrationEvents(item.config.stringIndex).catch(()=>[]))),getDischargeConfig().catch(()=>null)]);if(dischargeConfig)currentDirection=dischargeConfig.dischargeCurrentDirection;const open=eventLists.flat().filter(event=>['DRAFT','ACTIVE','BLOCKED','REVALIDATION_REQUIRED'].includes(event.status));const unique=[...new Map(open.map(event=>[event.calibrationEventId,event])).values()];activeCalibrations=(await Promise.all(unique.map(event=>getCalibrationEvent(event.calibrationEventId).catch(()=>null)))).filter((event):event is CalibrationEventDetail=>event!==null);error=''}
+		try{const data=await getBmsDashboardSnapshot();const[alarmResults,eventLists,dischargeConfig]=await Promise.all([Promise.allSettled(data.map(item=>listOpenBmsMonitoringAlarms(item.config.id))),Promise.all(data.map(item=>listCalibrationEvents(item.config.stringIndex).catch(()=>[]))),getDischargeConfig().catch(()=>null)]);const nextAlarms:Record<string,BmsAlarmOccurrence[]|null>={};alarmResults.forEach((result,index)=>{const key=data[index].config.id;nextAlarms[key]=result.status==='fulfilled'?result.value:null});alarmsByString=nextAlarms;alarmError=alarmResults.some(result=>result.status==='rejected')?'Alarm occurrences could not be loaded for some strings. Their alarm status is unavailable.':'';items=data;if(dischargeConfig)currentDirection=dischargeConfig.dischargeCurrentDirection;const open=eventLists.flat().filter(event=>['DRAFT','ACTIVE','BLOCKED','REVALIDATION_REQUIRED'].includes(event.status));const unique=[...new Map(open.map(event=>[event.calibrationEventId,event])).values()];activeCalibrations=(await Promise.all(unique.map(event=>getCalibrationEvent(event.calibrationEventId).catch(()=>null)))).filter((event):event is CalibrationEventDetail=>event!==null);error=''}
 		catch(cause){error=cause instanceof Error?cause.message:'Unable to load the BMS dashboard.'}
 		finally{loading=false}
 	}
@@ -46,25 +55,26 @@
 		catch(cause){calibrationCreateError=cause instanceof Error?cause.message:'Unable to create and start the calibration event.'}
 		finally{creatingCalibration=false}
 	}
-	function alarms(item:BmsDashboardItem){const summary=item.telemetry.summary,config=item.config,reasons:string[]=[];if(summary.maxResistance!==null&&config.highResistanceThreshold>0&&summary.maxResistance>=config.highResistanceThreshold)reasons.push('R');if(summary.maxTemperature!==null&&config.highTemperatureThreshold>0&&summary.maxTemperature>=config.highTemperatureThreshold)reasons.push('T');if(summary.minVoltage!==null&&config.lowVoltageThreshold>0&&summary.minVoltage<=config.lowVoltageThreshold)reasons.push('V');if(summary.maxVoltage!==null&&config.highVoltageThreshold>0&&summary.maxVoltage>=config.highVoltageThreshold)reasons.push('V');return[...new Set(reasons)]}
-	function disconnected(item:BmsDashboardItem){const summary=item.telemetry.summary;return!item.telemetry.active||[summary.avgVoltage,summary.avgResistance,summary.stringVoltage,summary.stringCurrent,summary.avgTemperature].every(value=>value===null)}
-	function statusFor(item:BmsDashboardItem){return alarms(item).length?'alarm':disconnected(item)?'offline':'normal'}
+	function activeAlarms(item:BmsDashboardItem){return alarmsByString[item.config.id]?.filter(alarm=>alarm.conditionActive)??[]}
+	function disconnected(item:BmsDashboardItem){const summary=item.telemetry.summary;return!item.telemetry.active||item.telemetry.calculation.snapshotStale||[summary.avgVoltage,summary.avgResistance,summary.stringVoltage,summary.stringCurrent,summary.avgTemperature].every(value=>value===null)}
+	function statusFor(item:BmsDashboardItem){return alarmsByString[item.config.id]===null||alarmsByString[item.config.id]===undefined?'unknown':activeAlarms(item).length?'alarm':disconnected(item)?'offline':'normal'}
 </script>
 
 <section class="page">
 	<div class="site-card">
 		<span class="site-icon"><Home size={20}/></span>
 		<div class="site-facts"><div><span>Owner</span><strong>{display(site.owner)}</strong></div><div><span>Operational team</span><strong>{display(site.operationalTeam)}</strong></div><div><span>Substation</span><strong>{display(site.substation)}</strong></div></div>
-		<div class="fleet-summary"><span><strong>{items.length}</strong> strings</span><span class:has-alarm={alarmStrings>0}><strong>{alarmStrings}</strong> alarm</span><span class:has-offline={offlineStrings>0}><strong>{offlineStrings}</strong> offline</span></div>
+		<div class="fleet-summary"><span><strong>{items.length}</strong> strings</span><span class:has-alarm={alarmStrings>0}><strong>{alarmError?'—':alarmStrings}</strong> alarm</span><span class:has-offline={offlineStrings>0}><strong>{offlineStrings}</strong> offline</span>{#if unknownAlarmStrings}<span><strong>{unknownAlarmStrings}</strong> alarm status unknown</span>{/if}</div>
 		<button class="calibrate" type="button" disabled={!items.length} onclick={openCalibrate}><Activity size={17}/>Calibrate</button>
 		<button class:loading class="refresh" aria-label="Refresh dashboard" disabled={loading} onclick={()=>load()}><RefreshCw size={18}/></button>
 	</div>
 	{#if error}<div class="request-error">{error}</div>{/if}
+	{#if alarmError}<div class="request-error" role="alert">{alarmError}</div>{/if}
 
 	{#if loading&&!items.length}
 		<div class="loading-card"><i></i><strong>Loading live string data…</strong></div>
 	{:else if items.length}
-		<div class="string-grid">{#each items as item (item.config.id)}{@const calibration=calibrationFor(item)}<BmsLiveStringPanel {item} {calibration} onOpenCalibration={()=>onOpenCalibration(item.config.stringIndex,calibration?.calibrationEventId??0)}/>{/each}</div>
+		<div class="string-grid">{#each items as item (item.config.id)}{@const calibration=calibrationFor(item)}<BmsLiveStringPanel {item} {calibration} alarmOccurrences={alarmsByString[item.config.id]??null} onOpenCalibration={()=>onOpenCalibration(item.config.stringIndex,calibration?.calibrationEventId??0)}/>{/each}</div>
 	{:else}
 		<div class="empty-card"><strong>No battery strings configured</strong><span>Add a string in Battery Strings to begin monitoring.</span></div>
 	{/if}
