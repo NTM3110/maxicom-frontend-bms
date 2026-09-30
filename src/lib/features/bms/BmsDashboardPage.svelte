@@ -3,7 +3,8 @@
 	import { onMount } from 'svelte';
 	import BmsLiveStringPanel from './BmsLiveStringPanel.svelte';
 	import { createCalibrationEvent, getBmsDashboardSnapshot, getCalibrationEvent, getDischargeConfig, hasBmsSession, listCalibrationEvents, listOpenBmsMonitoringAlarms, startCalibrationEvent, type BmsAlarmOccurrence, type BmsDashboardItem, type CalibrationEventDetail, type CalibrationEventType, type DischargeCurrentDirection } from '$lib/services/bms-api';
-	import { BMS_ASSET_PROFILE_EVENT, emptyBmsSiteProfile, loadBmsAssetProfile, type BmsSiteProfile } from '$lib/services/bms-asset-profile';
+	import { emptyBmsSiteProfile, type BmsSiteProfile } from '$lib/services/bms-asset-profile';
+	import { getBmsAssetSite } from '$lib/services/bms-api';
 
 	let { onOpenCalibration = (_stringIndex:number,_eventId=0) => undefined }: { onOpenCalibration?: (stringIndex:number,eventId?:number) => void } = $props();
 	let site=$state<BmsSiteProfile>(emptyBmsSiteProfile());
@@ -20,7 +21,8 @@
 	let unknownAlarmStrings=$derived(items.filter(item=>statusFor(item)==='unknown').length);
 	let selectedOpenCalibration=$derived(activeCalibrations.find(event=>stringIndexFor(event)===calibrationStringIndex)??null);
 
-	onMount(()=>{site=loadBmsAssetProfile().site;const updateSite=()=>site=loadBmsAssetProfile().site;window.addEventListener(BMS_ASSET_PROFILE_EVENT,updateSite);void load();const timer=setInterval(()=>void load(false),15000);return()=>{clearInterval(timer);window.removeEventListener(BMS_ASSET_PROFILE_EVENT,updateSite)}});
+	onMount(()=>{void loadSite();void load();const timer=setInterval(()=>{void loadSite();void load(false)},15000);return()=>clearInterval(timer)});
+	async function loadSite(){if(!hasBmsSession()){site=emptyBmsSiteProfile();return}try{const result=await getBmsAssetSite();site={...emptyBmsSiteProfile(),...(result.profile??{})}}catch{site=emptyBmsSiteProfile()}}
 	function load(showActivity=true):Promise<void>{
 		if(loadPromise)return loadPromise;
 		loadPromise=runLoad(showActivity).finally(()=>{loadPromise=null});

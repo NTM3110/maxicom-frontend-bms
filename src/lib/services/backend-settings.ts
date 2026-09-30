@@ -2,6 +2,10 @@ import { browser } from '$app/environment';
 
 const STORAGE_KEY = 'maxicom-backend-settings';
 const DEFAULT_BMS_HOST = '127.0.0.1';
+const configuredBmsWsPort = Number(import.meta.env.VITE_BMS_WS_PORT ?? 8085);
+const BMS_WS_PORT = Number.isInteger(configuredBmsWsPort) && configuredBmsWsPort > 0 && configuredBmsWsPort <= 65535
+	? configuredBmsWsPort
+	: 8085;
 const DEFAULT_RTS_HOST = hostFromUrl(String(import.meta.env.VITE_RTS_DEFAULT_HOST ?? import.meta.env.VITE_RTS_WS_URL ?? ''));
 
 export type BackendSettings = {
@@ -86,7 +90,7 @@ function pageProtocol(kind: 'http' | 'ws') {
 
 export function bmsWebSocketUrl() {
 	const host = getBackendSettings().bmsHost;
-	return `${pageProtocol('ws')}//${host}:8085`;
+	return `${pageProtocol('ws')}//${host}:${BMS_WS_PORT}`;
 }
 
 export function bmsRestPath(path: string) {

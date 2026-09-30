@@ -1,4 +1,5 @@
 import { browser } from '$app/environment';
+import type { BmsDeviceProfile, BmsSiteProfile } from '$lib/services/bms-asset-profile';
 import type { BmsNetworkUpdateParams } from '$lib/contracts/connectivity';
 import { bmsRestPath, bmsWebSocketUrl } from '$lib/services/backend-settings';
 
@@ -276,3 +277,26 @@ function scheduleFromDto(dto:LegacyScheduleDto):LegacySchedule{const now=Date.no
 export async function listLegacySohSchedules(stringId:string){const response=await fetch(bmsRestPath('/rest/soh-schedule/get-list'));const result=await response.json()as{success?:boolean;data?:LegacyScheduleDto[]};if(!response.ok||!result.success)return[];return(result.data??[]).filter(item=>item.strId===stringId).map(scheduleFromDto).sort((a,b)=>b.startTime-a.startTime);}
 export async function createLegacySohSchedule(stringId:string,startTime:Date,ratedCurrent?:number){const query=new URLSearchParams({strId:stringId,startTime:startTime.toISOString()});if(Number.isFinite(ratedCurrent))query.set('current',String(ratedCurrent));const response=await fetch(bmsRestPath(`/rest/soh-schedule/create?${query.toString()}`),{method:'POST'});if(!response.ok)throw new Error('Failed to create schedule.');return listLegacySohSchedules(stringId);}
 export async function stopLegacySohSchedule(stringId:string,scheduleId:string){const response=await fetch(bmsRestPath(`/rest/soh-schedule/stop?id=${encodeURIComponent(scheduleId)}`),{method:'POST'});if(!response.ok)throw new Error('Failed to stop schedule.');return listLegacySohSchedules(stringId);}
+
+// Asset Management profiles are persisted by the BMS backend. Empty DB rows
+// return null; callers must not substitute browser storage.
+export type BmsAssetSiteResult = { profile: BmsSiteProfile | null; updatedAt: string | null };
+export type BmsAssetStringResult = { stringId: string; profile: BmsDeviceProfile | null; updatedAt: string | null };
+export type BmsAssetSaveResult = { siteProfile: BmsSiteProfile; stringProfile?: BmsDeviceProfile; updatedAt: string };
+export type BmsSohHistoryPoint = { soh: number; measuredAt: string; source: string };
+export function getBmsAssetSite(): Promise<BmsAssetSiteResult> {
+	return bmsRpc<BmsAssetSiteResult>('bms.assets.site.get');
+}
+export function getBmsAssetString(stringIndex: number): Promise<BmsAssetStringResult> {
+	return bmsRpc<BmsAssetStringResult>('bms.assets.string.get', { stringIndex });
+}
+export function saveBmsAssetProfiles(siteProfile: BmsSiteProfile, stringIndex?: number, stringProfile?: BmsDeviceProfile): Promise<BmsAssetSaveResult> {
+	return bmsRpc<BmsAssetSaveResult>('bms.assets.save', {
+		siteProfile,
+		...(stringIndex !== undefined && stringProfile ? { stringIndex, stringProfile } : {})
+	});
+}
+export async function listBmsAssetSohHistory(stringIndex: number, limit = 50): Promise<BmsSohHistoryPoint[]> {
+	const response = await bmsRpc<{ points?: BmsSohHistoryPoint[] }>('bms.assets.sohHistory.list', { stringIndex, limit });
+	return response.points ?? [];
+}
