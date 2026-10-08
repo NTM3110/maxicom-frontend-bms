@@ -20,7 +20,7 @@
 		records: string[];
 	};
 
-	let { stringName, batteryString, ticket, onTicketChange, onBack, real = null }: { stringName: string; batteryString: BatteryString | null; ticket: InitialBaselineDemoTicket; onTicketChange: (ticket: InitialBaselineDemoTicket) => void; onBack: () => void; real?: InitialBaselineRealAdapter | null } = $props();
+	let { stringId, batteryString, ticket, onTicketChange, onBack, real = null }: { stringId: string; batteryString: BatteryString | null; ticket: InitialBaselineDemoTicket; onTicketChange: (ticket: InitialBaselineDemoTicket) => void; onBack: () => void; real?: InitialBaselineRealAdapter | null } = $props();
 
 	const steps: BaselineStep[] = [
 		{ title: 'Pre-check', action: 'Isolate the load and inspect the battery string before charging.', checklist: ['Battery and charger connections are checked.', 'Load MCB is open.', 'No leakage, damage or deformed safety valve.', 'Open-circuit voltage is recorded.'], records: ['String voltage', 'Cell / block voltage'] },
@@ -1068,7 +1068,7 @@
 	<header class="page-head">
 		<div>
 			<button class="back-link" onclick={onBack}><ArrowLeft size={16} />Back to events</button>
-			<span class="eyebrow">INITIAL BASELINE / {stringName}</span>
+			<span class="eyebrow">INITIAL BASELINE / {stringId}</span>
 			<h2 id="baseline-heading">Initial Baseline</h2>
 		</div>
 		<span class="guide-badge">{ticket.id}</span>

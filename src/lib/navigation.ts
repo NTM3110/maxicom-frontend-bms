@@ -4,6 +4,7 @@ import {
 	Cable,
 	ChartNoAxesCombined,
 	CircleGauge,
+	Clock3,
 	Database,
 	Gauge,
 	HardDrive,
@@ -11,6 +12,7 @@ import {
 	Network,
 	ShieldCheck,
 	SlidersHorizontal,
+	Server,
 	UserRound,
 	Wrench
 } from '@lucide/svelte';
@@ -48,6 +50,7 @@ export const navigationGroups: { label?: string; items: NavigationItem[] }[] = [
 		label: 'CONNECTIVITY',
 		items: [
 			{ id: 'serial-tcp', label: 'Serial & TCP', icon: Cable },
+			{ id: 'modbus-server', label: 'Modbus Server', icon: Server },
 			{ id: 'network', label: 'Network', icon: Network },
 			{ id: 'vpn', label: 'VPN', icon: ShieldCheck }
 		]
@@ -55,6 +58,7 @@ export const navigationGroups: { label?: string; items: NavigationItem[] }[] = [
 	{
 		label: 'SYSTEM',
 		items: [
+			{ id: 'ntp-server', label: 'NTP Server', icon: Clock3 },
 			{ id: 'alerts', label: 'Alerts', icon: MailWarning },
 			{ id: 'maintenance', label: 'Maintenance', icon: Wrench }
 		]

@@ -3,7 +3,7 @@
 	import { onMount } from 'svelte';
 	import FlatSelect from '$lib/components/FlatSelect.svelte';
 	import type { DeviceConfig } from '$lib/device-config';
-	import { hasBmsSession, listBmsSerialPorts, updateBmsSerialPort } from '$lib/services/bms-api';
+	import { createBmsTcpBridge, deleteBmsTcpBridge, hasBmsSession, listBmsSerialPorts, listBmsTcpBridges, updateBmsSerialPort, updateBmsTcpBridge } from '$lib/services/bms-api';
 	import { createSerialPort, deleteFelixComponent, getEdgeConfig, getFelixPids, updateFelixComponent } from '$lib/services/rts-api';
 	import {
 		BMS_BAUD_RATES, BMS_PARITIES, BMS_STOP_BITS, DATA_BITS,
@@ -27,13 +27,14 @@
 	let bmsSerial = $state<BmsSerialForm>({ baudRate:'9600', dataBits:'8', stopBits:'1', parity:'PARITY_NONE' });
 	let tcp = $state<RtsTcpForm>({ displayName:'', ip:'', port:502 });
 	let editingBmsId = $state<string | null>(null);
+	let editingBmsTcpId = $state<string | null>(null);
 	let editingBmsAlias = $state('');
 	let editingRtsId = $state<string | null>(null);
 	let editingRtsPid = $state<string | null>(null);
 	let saving = $state(false);
 	let templates = $derived(config?.rts?.serialPortTemplates ?? []);
 	let showProfileSwitch = $derived(configuredProduct === 'unified');
-	let showTcp = $derived(profile === 'rts' && (config?.connectivity.tcp ?? true));
+	let showTcp = $derived(config?.connectivity.tcp ?? true);
 
 	onMount(() => {
 		if (configuredProduct === 'bms') {
@@ -45,17 +46,18 @@
 		if (configuredProduct === 'unified' && hasBmsSession()) void loadBmsPorts();
 	});
 	async function loadRtsPorts(){try{const [edge,pids]=await Promise.all([getEdgeConfig(),getFelixPids()]);const pidFor=(id:string,factoryId:string,alias:string)=>pids.find((pid)=>pid.fpid===factoryId&&(pid.nameHint?.includes(`[${id}]`)||pid.nameHint?.includes(`[${alias}]`)))?.id;rtsPorts=Object.entries(edge.components).filter(([,component])=>component.factoryId==='Bridge.Modbus.Serial').map(([id,component])=>{const p=component.properties??{};const template=templates.find((item)=>item.key===id);return{componentId:id,pid:pidFor(id,'Bridge.Modbus.Serial',String(p.alias??id)),displayName:template?.displayName??String(p.alias??id),portName:String(p.portName??template?.portName??''),template:id,baudRate:String(p.baudRate??9600),databits:String(p.databits??8),stopbits:String(p.stopbits??'ONE'),parity:String(p.parity??'NONE')}});tcpBridges=Object.entries(edge.components).filter(([,component])=>component.factoryId==='Bridge.Modbus.Tcp').map(([id,component])=>{const p=component.properties??{};return{componentId:id,pid:pidFor(id,'Bridge.Modbus.Tcp',String(p.alias??id)),displayName:String(p.alias??id),ip:String(p.ip??''),port:Number(p.port??502)}});error='';}catch(cause){error=cause instanceof Error?cause.message:'Unable to load RTS Modbus bridges.';}}
-	async function loadBmsPorts(){ try { const ports=await listBmsSerialPorts(); bmsPorts=ports.map((port)=>({id:port.id,alias:port.alias,port:port.port,baudRate:String(port.baudRate),dataBits:String(port.dataBits),stopBits:String(port.stopBits),parity:port.parity})); } catch(cause){ error=cause instanceof Error?cause.message:'Unable to load BMS serial ports.'; } }
+	async function loadBmsPorts(){ try { const [ports,tcp]=await Promise.all([listBmsSerialPorts(),listBmsTcpBridges()]); bmsPorts=ports.map((port)=>({id:port.id,alias:port.alias,port:port.port,baudRate:String(port.baudRate),dataBits:String(port.dataBits),stopBits:String(port.stopBits),parity:port.parity})); tcpBridges=tcp.map((bridge)=>({componentId:bridge.id,displayName:bridge.alias,ip:bridge.ip,port:bridge.port})); error=''; } catch(cause){ error=cause instanceof Error?cause.message:'Unable to load BMS Modbus bridges.'; } }
 
 	function openCreate() {
-		error = ''; notice = ''; editingBmsId = null; editingRtsId=null; editingRtsPid=null;
+		error = ''; notice = ''; editingBmsId = null; editingBmsTcpId=null; editingRtsId=null; editingRtsPid=null;
 		if (profile === 'rts' && tab === 'serial') rtsSerial = { template:'', baudRate:'9600', databits:'8', stopbits:'ONE', parity:'NONE' };
 		if (profile === 'rts' && tab === 'tcp') tcp = { displayName:'', ip:'', port:502 };
+		if (profile === 'bms' && tab === 'tcp') tcp = { displayName:'', ip:'', port:502 };
 		dialogOpen = true;
 	}
 	function close() { dialogOpen = false; error = ''; }
 	function nextModbusId() {
-		const ids = [...rtsPorts.map((item) => item.componentId), ...tcpBridges.map((item) => item.componentId)];
+		const ids = [...rtsPorts.map((item) => item.componentId), ...bmsPorts.map((item) => item.id), ...tcpBridges.map((item) => item.componentId)];
 		let index = 0; while (ids.includes(`modbus${index}`)) index += 1;
 		return `modbus${index}`;
 	}
@@ -71,6 +73,17 @@
 			if (!/^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(tcp.ip)) { error = 'Enter a valid IPv4 address.'; return; }
 			if (tcp.port < 1 || tcp.port > 65535) { error = 'Port must be between 1 and 65535.'; return; }
 			const componentId = editingRtsId??nextModbusId();saving=true;try{if(editingRtsId){if(!editingRtsPid)throw new Error(`Could not find Felix PID for ${editingRtsId}.`);await updateFelixComponent(editingRtsPid,{apply:'true',alias:tcp.displayName,enabled:'true',ip:tcp.ip,port:tcp.port,propertylist:'alias,enabled,ip,port'});}else await createSerialPort('Bridge.Modbus.Tcp',buildRtsTcpCreatePayload(tcp,componentId));await loadRtsPorts();notice='RTS TCP bridge saved successfully.';}catch(cause){error=cause instanceof Error?cause.message:'Unable to save RTS TCP bridge.';return;}finally{saving=false;}
+		} else if (profile === 'bms' && tab === 'tcp') {
+			if (!tcp.displayName.trim()) { error = 'Enter a display name.'; return; }
+			if (!tcp.ip.trim()) { error = 'Enter a host or IP address.'; return; }
+			if (tcp.port < 1 || tcp.port > 65535) { error = 'Port must be between 1 and 65535.'; return; }
+			const bridge={id:editingBmsTcpId??nextModbusId(),alias:tcp.displayName.trim(),enabled:true,ip:tcp.ip.trim(),port:Number(tcp.port)};
+			saving=true;
+			try {
+				if(editingBmsTcpId) await updateBmsTcpBridge(bridge); else await createBmsTcpBridge(bridge);
+				await loadBmsPorts();
+				notice=`BMS TCP bridge ${editingBmsTcpId?'updated':'created'} successfully.`;
+			} catch(cause){ error=cause instanceof Error?cause.message:'Unable to save the BMS TCP bridge.'; return; } finally { saving=false; }
 		} else if (editingBmsId) {
 			const current = bmsPorts.find((item) => item.id === editingBmsId);
 			if (!current) { error='Serial bridge is no longer available.'; return; }
@@ -87,14 +100,16 @@
 	}
 	function editRtsSerial(port:(typeof rtsPorts)[number]){editingRtsId=port.componentId;editingRtsPid=port.pid??null;rtsSerial={template:port.template,baudRate:port.baudRate,databits:port.databits,stopbits:port.stopbits,parity:port.parity};tab='serial';dialogOpen=true;error='';}
 	function editRtsTcp(bridge:(typeof tcpBridges)[number]){editingRtsId=bridge.componentId;editingRtsPid=bridge.pid??null;tcp={displayName:bridge.displayName,ip:bridge.ip,port:bridge.port};tab='tcp';dialogOpen=true;error='';}
+	function editBmsTcp(bridge:(typeof tcpBridges)[number]){editingBmsTcpId=bridge.componentId;tcp={displayName:bridge.displayName,ip:bridge.ip,port:bridge.port};tab='tcp';dialogOpen=true;error='';}
 	async function removeRts(componentId:string,pid?:string){if(!confirm(`Delete ${componentId}?`))return;try{if(!pid)throw new Error(`Could not find Felix PID for ${componentId}.`);await deleteFelixComponent(pid);await loadRtsPorts();notice=`${componentId} deleted.`;}catch(cause){error=cause instanceof Error?cause.message:'Unable to delete RTS bridge.';}}
+	async function removeBmsTcp(componentId:string){if(!confirm(`Delete ${componentId}?`))return;try{await deleteBmsTcpBridge(componentId);await loadBmsPorts();notice=`${componentId} deleted.`;}catch(cause){error=cause instanceof Error?cause.message:'Unable to delete BMS TCP bridge.';}}
 	function selectProfile(value: ProductProfile) { selectedProfile = value; tab = 'serial'; notice = ''; }
 </script>
 
 <section class="page">
 	<div class="page-head">
-		<div><h2>Serial & TCP</h2><p>Configuration mapped directly from the {profile === 'rts' ? 'maxiems-web' : 'maxicom-bms-svelte'} source.</p></div>
-		{#if profile === 'rts'}<button class="primary" type="button" onclick={openCreate}><Plus size={17} /> Add {tab === 'serial' ? 'serial port' : 'TCP bridge'}</button>{/if}
+		<div><h2>Serial & TCP</h2><p>Configure the Modbus connections used by this device.</p></div>
+		{#if profile === 'rts' || (profile === 'bms' && tab === 'tcp')}<button class="primary" type="button" onclick={openCreate}><Plus size={17} /> Add {tab === 'serial' ? 'serial port' : 'TCP bridge'}</button>{/if}
 	</div>
 
 	{#if showProfileSwitch}<div class="profile-switch" aria-label="Source profile"><button class:active={profile === 'rts'} type="button" onclick={() => selectProfile('rts')}>RTS configuration</button><button class:active={profile === 'bms'} type="button" onclick={() => selectProfile('bms')}>BMS configuration</button></div>{/if}
@@ -105,15 +120,16 @@
 	<div class="table-wrap"><table><thead><tr>{#if tab === 'serial'}<th>#</th><th>Display name</th>{#if profile === 'bms'}<th>Device path</th>{/if}<th>Baud rate</th><th>Data bits</th><th>Stop bits</th><th>Parity</th><th></th>{:else}<th>#</th><th>Component ID</th><th>Display name</th><th>IP address</th><th>Port</th><th></th>{/if}</tr></thead><tbody>
 		{#if profile === 'rts' && tab === 'serial' && rtsPorts.length}{#each rtsPorts as port,index}<tr><td>{index+1}</td><td><strong>{port.displayName}</strong><small>{port.portName}</small></td><td>{port.baudRate}</td><td>{port.databits}</td><td>{port.stopbits}</td><td>{port.parity}</td><td class="actions"><button aria-label="Edit" onclick={()=>editRtsSerial(port)}><Pencil size={16}/></button><button class="delete" aria-label="Delete" onclick={()=>removeRts(port.componentId,port.pid)}><Trash2 size={16}/></button></td></tr>{/each}
 		{:else if profile === 'rts' && tab === 'tcp' && tcpBridges.length}{#each tcpBridges as bridge,index}<tr><td>{index+1}</td><td>{bridge.componentId}</td><td><strong>{bridge.displayName}</strong></td><td>{bridge.ip}</td><td>{bridge.port}</td><td class="actions"><button aria-label="Edit" onclick={()=>editRtsTcp(bridge)}><Pencil size={16}/></button><button class="delete" aria-label="Delete" onclick={()=>removeRts(bridge.componentId,bridge.pid)}><Trash2 size={16}/></button></td></tr>{/each}
-		{:else if profile === 'bms' && bmsPorts.length}{#each bmsPorts as port,index}<tr><td>{index+1}</td><td><strong>{port.alias}</strong><small>{port.id}</small></td><td>{port.port}</td><td>{port.baudRate}</td><td>{port.dataBits}</td><td>{port.stopBits}</td><td>{port.parity}</td><td class="actions"><button aria-label="Edit" onclick={() => { editingBmsId=port.id; editingBmsAlias=port.alias; bmsSerial={ baudRate:port.baudRate,dataBits:port.dataBits,stopBits:port.stopBits,parity:port.parity }; dialogOpen=true; }}><Pencil size={16}/></button></td></tr>{/each}
-		{:else}<tr><td class="empty" colspan="8"><Cable size={27}/><strong>{profile === 'rts' ? (tab === 'serial' ? 'No serial ports configured' : 'No TCP bridges configured') : 'No OpenEMS serial bridges returned'}</strong><span>{profile === 'bms' ? 'BMS loads existing bridges with bms.tools.serial.list; creating and deleting bridges are disabled in the original source.' : 'Add the first connection to begin configuration.'}</span></td></tr>{/if}
+		{:else if profile === 'bms' && tab === 'serial' && bmsPorts.length}{#each bmsPorts as port,index}<tr><td>{index+1}</td><td><strong>{port.alias}</strong><small>{port.id}</small></td><td>{port.port}</td><td>{port.baudRate}</td><td>{port.dataBits}</td><td>{port.stopBits}</td><td>{port.parity}</td><td class="actions"><button aria-label="Edit" onclick={() => { editingBmsId=port.id; editingBmsAlias=port.alias; bmsSerial={ baudRate:port.baudRate,dataBits:port.dataBits,stopBits:port.stopBits,parity:port.parity }; dialogOpen=true; }}><Pencil size={16}/></button></td></tr>{/each}
+		{:else if profile === 'bms' && tab === 'tcp' && tcpBridges.length}{#each tcpBridges as bridge,index}<tr><td>{index+1}</td><td>{bridge.componentId}</td><td><strong>{bridge.displayName}</strong></td><td>{bridge.ip}</td><td>{bridge.port}</td><td class="actions"><button aria-label="Edit" onclick={()=>editBmsTcp(bridge)}><Pencil size={16}/></button><button class="delete" aria-label="Delete" onclick={()=>removeBmsTcp(bridge.componentId)}><Trash2 size={16}/></button></td></tr>{/each}
+		{:else}<tr><td class="empty" colspan="8"><Cable size={27}/><strong>{tab === 'serial' ? 'No serial ports configured' : 'No TCP bridges configured'}</strong><span>{profile === 'bms' ? (tab === 'serial' ? 'Serial bridges are provisioned by the appliance deployment.' : 'Add a TCP bridge to connect a BMS string over Modbus TCP.') : 'Add the first connection to begin configuration.'}</span></td></tr>{/if}
 	</tbody></table></div>
 </section>
 
-{#if dialogOpen}<div class="backdrop" role="presentation" onclick={close}><dialog open onclick={(event)=>event.stopPropagation()}><header><div><h3>{profile === 'bms' ? 'Edit BMS serial port' : tab === 'serial' ? 'Add RTS serial port' : 'Add RTS TCP bridge'}</h3><p>Exact fields and enum values from the existing source.</p></div><button type="button" onclick={close} aria-label="Close"><X size={19}/></button></header><form onsubmit={(event)=>{event.preventDefault();save();}}><div class="body">
+	{#if dialogOpen}<div class="backdrop" role="presentation" onclick={close}><dialog open onclick={(event)=>event.stopPropagation()}><header><div><h3>{profile === 'bms' ? (tab === 'serial' ? 'Edit BMS serial port' : `${editingBmsTcpId?'Edit':'Add'} BMS TCP bridge`) : tab === 'serial' ? 'Add RTS serial port' : 'Add RTS TCP bridge'}</h3><p>Configure the native OpenEMS Modbus bridge.</p></div><button type="button" onclick={close} aria-label="Close"><X size={19}/></button></header><form onsubmit={(event)=>{event.preventDefault();save();}}><div class="body">
 	{#if profile === 'rts' && tab === 'serial'}<div class="grid"><label>Port Template<FlatSelect bind:value={rtsSerial.template} options={templates.map((item)=>({value:item.key,label:`${item.displayName} · ${item.portName??item.key}`}))} placeholder="Select a template" /></label><label>Baud Rate<FlatSelect bind:value={rtsSerial.baudRate} options={RTS_BAUD_RATES}/></label><label>Data Bits<FlatSelect bind:value={rtsSerial.databits} options={DATA_BITS}/></label><label>Stop Bits<FlatSelect bind:value={rtsSerial.stopbits} options={RTS_STOP_BITS}/></label><label>Parity<FlatSelect bind:value={rtsSerial.parity} options={RTS_PARITIES}/></label></div>
-	{:else if profile === 'rts'}<div class="grid"><label>Display Name<input bind:value={tcp.displayName} placeholder="e.g. Factory TCP Gateway"/></label><label>IP Address<input bind:value={tcp.ip} placeholder="192.168.1.100"/></label><label>Port<input type="number" min="1" max="65535" bind:value={tcp.port}/></label></div>
-	{:else}<div class="grid"><label>Alias<input bind:value={editingBmsAlias} placeholder="e.g. Serial 1"/></label><label>Baud Rate<FlatSelect bind:value={bmsSerial.baudRate} options={BMS_BAUD_RATES}/></label><label>Data Bits<FlatSelect bind:value={bmsSerial.dataBits} options={DATA_BITS}/></label><label>Stop Bits<FlatSelect bind:value={bmsSerial.stopBits} options={BMS_STOP_BITS}/></label><label>Parity<FlatSelect bind:value={bmsSerial.parity} options={BMS_PARITIES}/></label></div>{/if}
+		{:else if tab === 'tcp'}<div class="grid"><label>Display Name<input bind:value={tcp.displayName} placeholder="e.g. Factory TCP Gateway"/></label><label>Host / IP Address<input bind:value={tcp.ip} placeholder="192.168.1.100"/></label><label>Port<input type="number" min="1" max="65535" bind:value={tcp.port}/></label></div>
+		{:else}<div class="grid"><label>Alias<input bind:value={editingBmsAlias} placeholder="e.g. Serial 1"/></label><label>Baud Rate<FlatSelect bind:value={bmsSerial.baudRate} options={BMS_BAUD_RATES}/></label><label>Data Bits<FlatSelect bind:value={bmsSerial.dataBits} options={DATA_BITS}/></label><label>Stop Bits<FlatSelect bind:value={bmsSerial.stopBits} options={BMS_STOP_BITS}/></label><label>Parity<FlatSelect bind:value={bmsSerial.parity} options={BMS_PARITIES}/></label></div>{/if}
 	{#if error}<p class="error">{error}</p>{/if}</div><footer><button class="secondary" type="button" onclick={close}>Cancel</button><button class="primary" type="submit" disabled={saving}><Check size={16}/>{saving?'Saving…':'Save'}</button></footer></form></dialog></div>{/if}
 
 <style>

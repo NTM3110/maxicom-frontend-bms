@@ -11,6 +11,8 @@
 	import DischargeCalibrationPage from '$lib/features/bms/DischargeCalibrationPage.svelte';
 	import AlertsPage from '$lib/features/bms/AlertsPage.svelte';
 	import MaintenancePage from '$lib/features/bms/MaintenancePage.svelte';
+	import NtpServerPage from '$lib/features/bms/NtpServerPage.svelte';
+	import BmsModbusServerPage from '$lib/features/bms/BmsModbusServerPage.svelte';
 	import SystemInfoPage from '$lib/features/system/SystemInfoPage.svelte';
 	import SerialTcpPage from '$lib/features/connectivity/SerialTcpPage.svelte';
 	import NetworkPage from '$lib/features/connectivity/NetworkPage.svelte';
@@ -143,6 +145,8 @@
 				<SystemInfoPage config={deviceConfig} />
 			{:else if activeItem.id === 'serial-tcp'}
 				<SerialTcpPage config={deviceConfig} />
+			{:else if activeItem.id === 'modbus-server'}
+				<BmsModbusServerPage />
 			{:else if activeItem.id === 'network'}
 				<NetworkPage config={deviceConfig} />
 			{:else if activeItem.id === 'vpn'}
@@ -167,6 +171,8 @@
 				<AlertsPage />
 			{:else if activeItem.id === 'maintenance'}
 				<MaintenancePage />
+			{:else if activeItem.id === 'ntp-server'}
+				<NtpServerPage />
 			{:else if activeItem.id === 'account'}
 				<AccountWorkspace config={deviceConfig} />
 			{:else}

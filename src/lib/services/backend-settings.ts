@@ -40,7 +40,7 @@ function isLoopbackHost(value: string) {
 	return hostname === 'localhost' || hostname === '::1' || /^127(?:\.\d{1,3}){3}$/.test(hostname);
 }
 
-/** Firefox may prefer IPv6 for localhost while the Edge WebSocket is IPv4-only. */
+/** Loopback aliases select the BMS backend on the device serving this UI. */
 function normalizeBmsHost(value: string) {
 	const loopbackCandidate = value.trim().replace(/^\[|\]$/g, '').toLowerCase();
 	if (loopbackCandidate === 'localhost' || loopbackCandidate === '::1') return DEFAULT_BMS_HOST;
@@ -90,6 +90,12 @@ function pageProtocol(kind: 'http' | 'ws') {
 
 export function bmsWebSocketUrl() {
 	const host = getBackendSettings().bmsHost;
+	// The browser connects to the web server; its proxy reaches device loopback.
+	// Vite supplies the same route during development.
+	if (isLoopbackHost(host)) {
+		const webHost = browser ? window.location.host : DEFAULT_BMS_HOST;
+		return `${pageProtocol('ws')}//${webHost}/websocket`;
+	}
 	return `${pageProtocol('ws')}//${host}:${BMS_WS_PORT}`;
 }
 

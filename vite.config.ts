@@ -39,6 +39,12 @@ export default defineConfig(({ mode }) => {
 		],
 		server: {
 			proxy: {
+				'/websocket': {
+					target: bmsEdgeTarget,
+					changeOrigin: true,
+					ws: true,
+					rewrite: (path) => path.replace(/^\/websocket\/?/, '/')
+				},
 				'/openems': {
 					target: bmsEdgeTarget,
 					changeOrigin: true,

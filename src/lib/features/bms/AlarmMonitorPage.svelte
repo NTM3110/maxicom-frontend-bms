@@ -158,10 +158,10 @@
     </header>
 
     <section class="toolbar" aria-label="Alarm filters">
-        <label>Battery string
+        <label>String ID
             <select value={selectedStringKey} onchange={changeString} disabled={loading || !strings.length}>
                 {#if !strings.length}<option value="">No strings available</option>{/if}
-                {#each strings as item}<option value={item.id}>{item.stringName} ({item.id})</option>{/each}
+                {#each strings as item}<option value={item.id}>{item.id}</option>{/each}
             </select>
         </label>
         <div class="view-switch" role="group" aria-label="Alarm status filter">

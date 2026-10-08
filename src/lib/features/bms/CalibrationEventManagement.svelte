@@ -57,7 +57,7 @@
 		<button class="secondary" disabled={loading || mutating} onclick={onReload}><RefreshCw size={16} class={loading ? 'spinning' : ''} />Reload list</button>
 	</div>
 	<div class="setup-grid">
-		<div class="field"><span>Battery string</span><BmsSelectField ariaLabel="Battery string" value={selectedStringIndex} options={[{ value: 0, label: 'Select a configured string' }, ...strings.map((item) => ({ value: item.stringIndex, label: `str${item.stringIndex} — ${item.stringName}` }))]} disabled={loading || mutating} onChange={(value) => onStringChange(Number(value))} /></div>
+		<div class="field"><span>String ID</span><BmsSelectField ariaLabel="String ID" value={selectedStringIndex} options={[{ value: 0, label: 'Select a configured string' }, ...strings.map((item) => ({ value: item.stringIndex, label: item.id }))]} disabled={loading || mutating} onChange={(value) => onStringChange(Number(value))} /></div>
 		<div class="read-only"><span>Rated capacity</span><strong>{selectedString ? `${selectedString.ratedCapacity} Ah` : '—'}</strong></div>
 		<div class="read-only"><span>Current mapping</span><strong>{currentDirection}</strong></div>
 		<div class="field"><span>Event type</span><BmsSelectField ariaLabel="Event type" value={selectedCreateType} options={[{ value: 'INITIAL_BASELINE', label: 'Initial Baseline' }, { value: 'MONTHLY_INSPECTION', label: 'Monthly Inspection' }]} disabled={loading || mutating} onChange={(value) => onCreateTypeChange(value as 'INITIAL_BASELINE' | 'MONTHLY_INSPECTION')} /></div>

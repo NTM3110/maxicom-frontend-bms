@@ -100,7 +100,7 @@
 		<h4 id="report-event-details">Event details</h4>
 		<dl class="summary-grid">
 			<div><dt>Event type</dt><dd>{event.eventType.replaceAll('_', ' ')}</dd></div>
-			<div><dt>Battery string</dt><dd>{event.configuration.stringKey}</dd></div>
+			<div><dt>String ID</dt><dd>{event.configuration.stringKey}</dd></div>
 			<div><dt>Current mapping</dt><dd>{event.configuration.currentDirection}</dd></div>
 			<div><dt>Created by</dt><dd>{event.createdByName}</dd></div>
 			<div><dt>Created at</dt><dd>{formatCalibrationTime(event.createdAt)}</dd></div>

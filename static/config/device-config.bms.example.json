@@ -13,7 +13,9 @@
       "battery-strings",
       "assets",
       "serial-tcp",
+      "modbus-server",
       "network",
+      "ntp-server",
       "calibration",
       "alerts",
       "maintenance"
@@ -21,7 +23,7 @@
   },
   "connectivity": {
     "serial": true,
-    "tcp": false
+    "tcp": true
   },
   "authentication": {
     "defaultUser": {

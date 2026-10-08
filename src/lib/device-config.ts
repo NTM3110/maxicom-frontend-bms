@@ -83,6 +83,8 @@ export function getNavigationForConfig(config: DeviceConfig) {
 			...group,
 			items: group.items.filter((item) =>
 				enabled.has(item.id)
+				&& !(config.device.product !== 'bms' && item.id === 'modbus-server')
+				&& !(config.device.product === 'rts' && item.id === 'ntp-server')
 				&& !(config.device.product === 'bms' && group.label === 'SYSTEM' && item.id === 'system-info'))
 		}))
 		.filter((group) => group.items.length > 0);

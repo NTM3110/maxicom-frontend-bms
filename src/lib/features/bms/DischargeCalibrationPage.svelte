@@ -332,7 +332,7 @@
 	function startInitialBaselineDemo() {
 		if (!selectedString) return;
 		const existing = loadInitialBaselineDemoTicket(selectedString.stringIndex);
-		initialBaselineTicket = existing ?? createInitialBaselineDemoTicket(selectedString.stringIndex, selectedString.stringName);
+		initialBaselineTicket = existing ?? createInitialBaselineDemoTicket(selectedString.stringIndex, selectedString.id);
 		saveInitialBaselineDemoTicket(initialBaselineTicket);
 		baselinePreviewOpen = true;
 		workflowOpen = false;
@@ -576,7 +576,7 @@
 	}
 
 	function mapRealInitialBaselineTicket(detail: CalibrationEventDetail, evidence: CalibrationManualEvidence[], samples: CalibrationSample[]): InitialBaselineDemoTicket {
-		const seed = createInitialBaselineDemoTicket(selectedStringIndex, selectedString?.stringName ?? detail.configuration.stringKey);
+		const seed = createInitialBaselineDemoTicket(selectedStringIndex, selectedString?.id ?? detail.configuration.stringKey);
 		const has = (type: string) => evidence.some((item) => item.evidenceType === type && ['PASS', 'RECORDED'].includes(item.status));
 		const numericEvidence = (type: string) => evidence.filter((item) => item.evidenceType === type
 			&& item.numericValue != null).at(-1)?.numericValue ?? null;
@@ -1033,9 +1033,9 @@
 	{/if}
 
 	{#if baselinePreviewOpen}
-		{#if initialBaselineTicket}<InitialBaselinePreview stringName={selectedString?.stringName ?? 'Battery string'} batteryString={selectedString} ticket={initialBaselineTicket} onTicketChange={updateInitialBaselineTicket} onBack={returnToManagement} />{/if}
+		{#if initialBaselineTicket}<InitialBaselinePreview stringId={selectedString?.id ?? `str${selectedStringIndex}`} batteryString={selectedString} ticket={initialBaselineTicket} onTicketChange={updateInitialBaselineTicket} onBack={returnToManagement} />{/if}
 	{:else if workflowOpen && event?.eventType === 'INITIAL_BASELINE' && realInitialBaselineTicket && realInitialBaselineAdapter}
-		{#key event.calibrationEventId}<InitialBaselinePreview stringName={selectedString?.stringName ?? event.configuration.stringKey} batteryString={selectedString} ticket={realInitialBaselineTicket} real={realInitialBaselineAdapter} onTicketChange={() => {}} onBack={returnToManagement} />{/key}
+		{#key event.calibrationEventId}<InitialBaselinePreview stringId={selectedString?.id ?? event.configuration.stringKey} batteryString={selectedString} ticket={realInitialBaselineTicket} real={realInitialBaselineAdapter} onTicketChange={() => {}} onBack={returnToManagement} />{/key}
 	{:else if reportOpen && event?.closedAt}
 		<CalibrationEventReport {event} onBack={returnToManagement} />
 	{:else if !workflowOpen && loading && !event}
@@ -1044,7 +1044,7 @@
 		<section class="panel empty"><BatteryCharging size={28} /><strong>No Calibration Event found</strong><span>Create a Monthly Inspection draft to begin a new lifecycle.</span></section>
 	{:else if workflowOpen && event}
 		<article class="panel event-summary">
-			<div class="section-head"><div><span class="eyebrow">EVENT #{event.calibrationEventId}</span><h3>{selectedString?.stringName ?? event.configuration.stringKey}</h3></div><span class:active={event.status === 'ACTIVE'} class="status">{event.status}</span></div>
+			<div class="section-head"><div><span class="eyebrow">EVENT #{event.calibrationEventId}</span><h3>{selectedString?.id ?? event.configuration.stringKey}</h3></div><span class:active={event.status === 'ACTIVE'} class="status">{event.status}</span></div>
 			<dl>
 				<div><dt>Event type</dt><dd>{event.eventType}</dd></div>
 				<div><dt>Event version</dt><dd>{event.eventVersion}</dd></div>
