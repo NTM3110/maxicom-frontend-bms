@@ -45,7 +45,8 @@ export async function platformReady(){
 }
 export async function authenticateBms(username:string,password:string){const response=await openemsRpc<{token?:unknown}>('platformAuthenticate',{username,password});if(typeof response.token!=='string'||!response.token)throw new Error('The platform returned an invalid session token.');sessionStorage.setItem(TOKEN_KEY,response.token);return response.token;}
 export async function logoutBms(){const current=bmsSessionToken();try{if(current)await openemsRpc('platformLogout',{token:current});}finally{if(browser)sessionStorage.removeItem(TOKEN_KEY);}}
-export function notifyBmsKeyboard(action:'normal'|'password'){const current=bmsSessionToken();if(!current)return Promise.resolve();return openemsRpc('bms.tools.keyboard',{token:current,action});}
+export type BmsKeyboardAction='normal'|'dialer'|'hide';
+export async function notifyBmsKeyboard(action:BmsKeyboardAction,timeoutMs=1000){const current=bmsSessionToken();if(!current){if(action!=='normal')return;await openemsRpc('bms.tools.keyboard',{action},timeoutMs);return;}await openemsRpc('bms.tools.keyboard',{token:current,action},timeoutMs);}
 function token(){const value=bmsSessionToken();if(!value)throw new Error('Your session has expired. Please sign in again.');return value;}
 function bmsRpc<T=Record<string,unknown>>(method:string,params:Record<string,unknown>={}){return openemsRpc<T>(method,{...params,token:token()});}
 
@@ -148,11 +149,11 @@ export const BMS_BAUD_RATES=[9600,19200,38400,57600,115200] as const;
 export const BMS_DATA_BITS=[5,6,7,8] as const;
 export const BMS_STOP_BITS=[1,1.5,2] as const;
 export const BMS_PARITIES=['PARITY_NONE','PARITY_EVEN','PARITY_ODD','PARITY_MARK','PARITY_SPACE'] as const;
-export type BmsSerialPort={id:string;alias:string;port:string;channel:string;baudRate:number;dataBits:number;stopBits:number;parity:string};
-type SerialBridge={id:string;alias:string;enabled:boolean;portName:string;baudRate:number;databits:number;parity:string;stopbits:string};
-function serialPort(v:SerialBridge):BmsSerialPort{return{id:v.id,alias:v.alias.trim()||v.id,port:v.portName,channel:v.id,baudRate:Number(v.baudRate),dataBits:Number(v.databits),parity:`PARITY_${v.parity}`,stopBits:v.stopbits==='TWO'?2:v.stopbits==='ONE_POINT_FIVE'?1.5:1};}
+export type BmsSerialPort={id:string;alias:string;port:string;channel:string;baudRate:number;dataBits:number;stopBits:number;parity:string;batchAcquisition:boolean;responseTimeoutMs:number};
+type SerialBridge={id:string;alias:string;enabled:boolean;portName:string;baudRate:number;databits:number;parity:string;stopbits:string;batchAcquisition?:boolean;responseTimeoutMs?:number};
+function serialPort(v:SerialBridge):BmsSerialPort{return{id:v.id,alias:v.alias.trim()||v.id,port:v.portName,channel:v.id,baudRate:Number(v.baudRate),dataBits:Number(v.databits),parity:`PARITY_${v.parity}`,stopBits:v.stopbits==='TWO'?2:v.stopbits==='ONE_POINT_FIVE'?1.5:1,batchAcquisition:v.batchAcquisition??false,responseTimeoutMs:Number(v.responseTimeoutMs??(v.batchAcquisition?100:1000))};}
 export async function listBmsSerialPorts(){const response=await bmsRpc<{bridges?:SerialBridge[]}>('bms.tools.serial.list');return(response.bridges??[]).map(serialPort);}
-export async function updateBmsSerialPort(port:BmsSerialPort){const response=await bmsRpc<SerialBridge>('bms.tools.serial.update',{id:port.id,alias:port.alias,baudRate:Number(port.baudRate),databits:Number(port.dataBits),parity:port.parity,stopbits:`STOPBITS_${port.stopBits===1.5?'ONE_POINT_FIVE':port.stopBits===2?'TWO':'ONE'}`});return serialPort(response);}
+export async function updateBmsSerialPort(port:BmsSerialPort){const response=await bmsRpc<SerialBridge>('bms.tools.serial.update',{id:port.id,alias:port.alias,baudRate:Number(port.baudRate),databits:Number(port.dataBits),parity:port.parity,stopbits:`STOPBITS_${port.stopBits===1.5?'ONE_POINT_FIVE':port.stopBits===2?'TWO':'ONE'}`,...(port.batchAcquisition?{responseTimeoutMs:port.responseTimeoutMs}:{})});return serialPort(response);}
 
 export type BmsTcpBridge={id:string;alias:string;enabled:boolean;ip:string;port:number};
 export async function listBmsTcpBridges(){const response=await bmsRpc<{bridges?:BmsTcpBridge[]}>('bms.tools.tcp.list');return response.bridges??[];}
@@ -163,7 +164,8 @@ export function deleteBmsTcpBridge(id:string){return bmsRpc<{deleted:boolean}>('
 export type BmsModbusServerTransport='TCP'|'SERIAL_RTU';
 export type BmsModbusServerRuntimeState='DISABLED'|'STARTING'|'ACTIVE'|'ERROR';
 export type BmsModbusServerPort={id:'modbus0'|'modbus1'|'modbus2';displayName:string;portName:string;serialFormat:string;available:boolean;selected:boolean;owner:'NONE'|'BMS_STRING'|'MODBUS_SERVER'|string;ownerIds:string[]};
-export type BmsModbusServerState={enabled:boolean;transport:BmsModbusServerTransport;unitId:number;bindAddress:string;tcpPort:number;serialPortId:string|null;runtimeState:BmsModbusServerRuntimeState;runtimeError:string|null;ports:BmsModbusServerPort[]};
+export type BmsModbusRegisterMap={version:number;functionCode:number;stringStride:number;maxStringId:number;registersPerString:number;unavailableS32:string;alarmActiveRelativeAddress:number;alarmValidityRelativeAddress:number;measurements:{relativeAddress:number;registerCount:number;type:'SIGNED_32';label:string;unit:string;scale:number}[];alarmBits:{bit:number;label:string}[]};
+export type BmsModbusServerState={enabled:boolean;transport:BmsModbusServerTransport;unitId:number;bindAddress:string;tcpPort:number;serialPortId:string|null;runtimeState:BmsModbusServerRuntimeState;runtimeError:string|null;ports:BmsModbusServerPort[];registerMap?:BmsModbusRegisterMap};
 export type BmsModbusServerUpdate=Pick<BmsModbusServerState,'enabled'|'transport'|'unitId'|'bindAddress'|'tcpPort'|'serialPortId'>;
 export function getBmsModbusServer(){return bmsRpc<BmsModbusServerState>('bms.tools.modbusServer.get');}
 export function updateBmsModbusServer(config:BmsModbusServerUpdate){return bmsRpc<BmsModbusServerState>('bms.tools.modbusServer.update',config);}
@@ -269,17 +271,21 @@ export type WifiStatus={connected:boolean;ip?:string;interface?:string};
 export type MaintenanceString={stringIndex:number;stringName:string;cellQty:number;startTaUnitId:number};
 export type IrTaskStatus={type?:string;state:string;startId?:number;endId?:number;currentId?:number;nextId?:number;running:boolean;exitCode?:number;startedAt?:string;finishedAt?:string;error?:string;activeIds:number[];missingIds:number[];activatedIds:number[];notActivatedIds:number[];output:string[]};
 export type TcTaskStatus={type?:string;state:string;slaveId:number;running:boolean;exitCode?:number;startedAt?:string;finishedAt?:string;error?:string;transformerRange?:number|null;calibrationSigned?:number|null;calibrationRaw?:number|null;firstCurrentSignedRaw?:number|null;latestCurrentRaw?:number|null;latestCurrentSignedRaw?:number|null;latestCurrentAmps?:number|null;currentSampleIndex:number;successfulCurrentSamples:number;currentChanged:boolean;output:string[]};
-export type GpioOutput={stringIndex:number;ioIndex:number;gpioNumber:number;alarmValue:number;normalValue:number;direction:'input'|'output';alarm:boolean;alarmRegisterValue?:number|null;alarmChannelId?:string|null;alarmReadError?:string|null;alarmReadAt?:number|null;desiredValue?:number|null;lastWrittenValue?:number|null;lastDirection?:string|null;lastError?:string|null;updatedAt:number};
-export type GpioStatus={scriptPath:string;strings:Record<string,GpioOutput>};
+export type AddressTaskStatus={type?:string;state:string;running:boolean;moduleType?:'TA'|'TC';oldId?:number;newId?:number;phase?:string;verification?:string;bridgeId?:string;serialPort?:string;error?:string;output:string[]};
+export type GpioOutput={stringIndex:number;ioIndex:number;gpioNumber:number;alarmValue:number;normalValue:number;direction:'output';alarm:boolean|null;alarmSourceState?:'ACTIVE'|'INACTIVE'|'UNKNOWN'|'STRING_NOT_FOUND';synchronized?:boolean;alarmRegisterValue?:number|null;alarmChannelId?:string|null;alarmReadError?:string|null;alarmReadAt?:number|null;desiredValue?:number|null;lastWrittenValue?:number|null;lastDirection?:string|null;lastError?:string|null;updatedAt?:number};
+export type GpioBusyResource={resource:string;pid:number|null;processName:string;user:string|null};
+export type GpioStatus={scriptPath:string;strings:Record<string,GpioOutput>;requestedMode?:'GPIO'|'UART3'|null;activeMode?:'GPIO'|'UART3'|'UNKNOWN';confirmed?:boolean;changed?:boolean;checkedAt?:string;errorCode?:string|null;message?:string|null;busyResources?:GpioBusyResource[];rollbackConfirmed?:boolean|null;gpio?:Record<string,{number:number;exported:boolean}>;uart?:{device:string;driverBound:boolean;baudRate:number|null}};
 export function getWifiStatus(){return bmsRpc<WifiStatus>('bms.tools.maintenance.wifi',{action:'status'});}
 export async function scanWifi(){const r=await bmsRpc<WifiNetwork[]|{networks?:WifiNetwork[]}>('bms.tools.maintenance.wifi',{action:'scan'});return Array.isArray(r)?r:r.networks??[];}
 export function connectWifi(ssid:string,bssid:string,password?:string){return bmsRpc('bms.tools.maintenance.wifi',{action:'connect',ssid,bssid,...(password?{password}:{})});}
 export function rebootBms(){return bmsRpc('bms.tools.system.reboot');}
-export function getMaintenanceStatus<T extends IrTaskStatus|TcTaskStatus>(){return bmsRpc<T>('bms.tools.maintenance.status');}
+export function getMaintenanceStatus<T extends IrTaskStatus|TcTaskStatus|AddressTaskStatus>(){return bmsRpc<T>('bms.tools.maintenance.status');}
 export function startIrTask(action:'activate'|'scan',stringIndex:number,startId:number,endId:number){return bmsRpc<IrTaskStatus>(action==='activate'?'bms.tools.maintenance.irActivate':'bms.tools.maintenance.irScan',{stringIndex,startId,endId});}
-export function stopMaintenanceTask<T extends IrTaskStatus|TcTaskStatus>(){return bmsRpc<T>('bms.tools.maintenance.stop');}
+export function stopMaintenanceTask<T extends IrTaskStatus|TcTaskStatus|AddressTaskStatus>(){return bmsRpc<T>('bms.tools.maintenance.stop');}
 export function startTcTask(action:'read-range'|'write-range'|'read-current'|'calibrate',stringIndex:number,value?:number){return bmsRpc<TcTaskStatus>('bms.tools.maintenance.tc',{stringIndex,action:`tc-${action}`,...(value===undefined?{}:{value})});}
+export function startAddressChangeTask(stringIndex:number,moduleType:'TA'|'TC',oldId:number,newId:number){return bmsRpc<AddressTaskStatus>('bms.tools.maintenance.addressChange',{stringIndex,moduleType,oldId,newId});}
 export function getGpioStatus(){return bmsRpc<GpioStatus>('bms.tools.maintenance.gpio',{action:'status'});}
+export function switchGpioMode(mode:'GPIO'|'UART3'){return bmsRpc<GpioStatus>('bms.tools.maintenance.gpio',{action:'switch',mode});}
 export function saveGpioStatus(string1AlarmValue:number,string2AlarmValue:number,string1Direction:'input'|'output',string2Direction:'input'|'output'){return bmsRpc<GpioStatus>('bms.tools.maintenance.gpio',{action:'save',string1AlarmValue,string2AlarmValue,string1Direction,string2Direction});}
 export async function listMaintenanceStrings(){const r=await bmsRpc<{strings?:MaintenanceString[]}>('bms.strings.list');return(r.strings??[]).filter(v=>Number.isInteger(v.stringIndex)&&v.stringIndex>0&&Number.isInteger(v.cellQty)&&v.cellQty>0&&Number.isInteger(v.startTaUnitId));}
 export async function importBmsConfiguration(file:File){const body=new FormData();body.append('file',file);const response=await fetch(bmsRestPath('/rest/csv_export'),{method:'POST',body});if(!response.ok)throw new Error(await response.text());}
